@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "razecli"
+version = "0.1.0"
+description = "Modular CLI for Razer mouse settings"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "RazeCLI Contributors" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+detect = [
+  "hidapi>=0.14"
+]
+ble = [
+  "bleak>=0.22"
+]
+bundle = [
+  "pyinstaller>=6.0"
+]
+
+[project.scripts]
+razecli = "razecli.cli:main"
+
+[tool.setuptools]
+packages = ["razecli", "razecli.backends", "razecli.models", "razecli.ble"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

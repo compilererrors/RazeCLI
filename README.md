@@ -148,6 +148,27 @@ Option 2 (distribution): build a standalone macOS binary (no Python required on 
 The build script creates a self-contained executable in `dist/`.  
 Use that binary directly on machines where you do not want to manage Python/venv.
 
+Option 3 (fast local executable): build an onedir bundle (larger output, much faster startup than `--onefile`).
+
+```bash
+./scripts/build_macos_onedir.sh
+./dist/razecli-onedir/razecli-onedir --help
+```
+
+`onedir` starts faster because it does not self-extract on each launch.  
+`onefile` is easier to share because it ships as a single executable file.
+
+Option 4 (no venv, Homebrew from release asset):
+
+```bash
+brew install --formula "https://github.com/compilererrors/RazeCLI/releases/download/<tag>/razecli.rb"
+razecli --help
+```
+
+Use a real release tag (for example `v0.1.2`) in the URL.  
+This Homebrew path installs the packaged `onedir` asset for faster startup than onefile.
+The `Manual Release` GitHub Action updates this README URL to the newly published tag automatically.
+
 ## Usage
 
 List models:

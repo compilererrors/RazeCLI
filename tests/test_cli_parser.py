@@ -1,4 +1,6 @@
 import unittest
+import subprocess
+import sys
 
 from razecli.cli import DEFAULT_MODEL, build_parser
 
@@ -207,6 +209,25 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.button_mapping_command, "set")
         self.assertEqual(args.button, "side_1")
         self.assertEqual(args.action, "mouse:back")
+
+    def test_cli_module_import_is_lazy(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; import razecli.cli; "
+                    "print(int('razecli.device_service' in sys.modules)); "
+                    "print(int('razecli.ble_probe' in sys.modules)); "
+                    "print(int('razecli.tui' in sys.modules))"
+                ),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        flags = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        self.assertEqual(flags, ["0", "0", "0"])
 
 
 if __name__ == "__main__":

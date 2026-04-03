@@ -1,28 +1,29 @@
 """Command-line interface for RazeCLI."""
 
-import argparse
-import sys
-from typing import Optional
+from __future__ import annotations
 
-from razecli.ble_probe import (
+import argparse
+import json
+import sys
+from typing import TYPE_CHECKING, Optional
+
+from razecli.ble.constants import (
     DEFAULT_RAZER_BT_SERVICE_UUID,
     DEFAULT_RAZER_BT_WRITE_CHAR_UUID,
 )
-from razecli.cli_battery import handle_battery
-from razecli.cli_ble import handle_ble
-from razecli.cli_button_mapping import handle_button_mapping
-from razecli.cli_common import emit
-from razecli.cli_devices import handle_devices
-from razecli.cli_dpi import handle_dpi
-from razecli.cli_dpi_stages import handle_dpi_stages
-from razecli.cli_poll_rate import handle_poll_rate
-from razecli.cli_rgb import handle_rgb
-from razecli.device_service import DeviceService
 from razecli.errors import CapabilityUnsupportedError, DeviceSelectionError, RazeCliError
-from razecli.models.base import format_usb_id
-from razecli.tui import run_tui
+
+if TYPE_CHECKING:
+    from razecli.device_service import DeviceService
 
 DEFAULT_MODEL = "deathadder-v2-pro"
+
+
+def _emit(payload: object, *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload)
 
 
 def _add_target_args(parser: argparse.ArgumentParser, default_model: bool = True) -> None:
@@ -436,6 +437,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _handle_models(service: DeviceService, as_json: bool) -> int:
+    from razecli.models.base import format_usb_id
+
     models = service.registry.list()
     if as_json:
         payload = [
@@ -451,7 +454,7 @@ def _handle_models(service: DeviceService, as_json: bool) -> int:
             }
             for model in models
         ]
-        emit(payload, as_json=True)
+        _emit(payload, as_json=True)
         return 0
 
     if not models:
@@ -473,6 +476,8 @@ def _handle_models(service: DeviceService, as_json: bool) -> int:
 
 
 def _handle_tui(service: DeviceService, args: argparse.Namespace) -> int:
+    from razecli.tui import run_tui
+
     if args.json:
         raise RazeCliError("--json is not supported in interactive TUI mode")
 
@@ -490,7 +495,11 @@ def _handle_tui(service: DeviceService, args: argparse.Namespace) -> int:
 
 def run(args: argparse.Namespace) -> int:
     if args.command == "ble":
+        from razecli.cli_ble import handle_ble
+
         return handle_ble(args)
+
+    from razecli.device_service import DeviceService
 
     service = DeviceService(backend_mode=args.backend)
 
@@ -498,24 +507,38 @@ def run(args: argparse.Namespace) -> int:
         return _handle_models(service, args.json)
 
     if args.command == "devices":
+        from razecli.cli_devices import handle_devices
+
         return handle_devices(service, args)
 
     if args.command == "dpi":
+        from razecli.cli_dpi import handle_dpi
+
         return handle_dpi(service, args)
 
     if args.command == "dpi-stages":
+        from razecli.cli_dpi_stages import handle_dpi_stages
+
         return handle_dpi_stages(service, args)
 
     if args.command == "poll-rate":
+        from razecli.cli_poll_rate import handle_poll_rate
+
         return handle_poll_rate(service, args)
 
     if args.command == "battery":
+        from razecli.cli_battery import handle_battery
+
         return handle_battery(service, args)
 
     if args.command == "rgb":
+        from razecli.cli_rgb import handle_rgb
+
         return handle_rgb(service, args)
 
     if args.command == "button-mapping":
+        from razecli.cli_button_mapping import handle_button_mapping
+
         return handle_button_mapping(service, args)
 
     if args.command == "tui":
@@ -532,7 +555,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run(args)
     except (RazeCliError, DeviceSelectionError, CapabilityUnsupportedError) as exc:
         if getattr(args, "json", False):
-            emit({"status": "error", "message": str(exc)}, as_json=True)
+            _emit({"status": "error", "message": str(exc)}, as_json=True)
         else:
             print(f"Error: {exc}", file=sys.stderr)
         return 2

@@ -26,10 +26,12 @@ PYTHONPYCACHEPREFIX=/tmp/razecli-pyc "$PYTHON" -m PyInstaller \
   --onefile \
   --name razecli \
   --collect-all hid \
+  --collect-submodules razecli.models \
+  --collect-submodules razecli.backends \
+  --collect-submodules razecli.ble \
   razecli/__main__.py
 
 echo ""
 echo "Built binary: $ROOT_DIR/dist/razecli"
 echo "Run it:"
 echo "  ./dist/razecli --help"
-

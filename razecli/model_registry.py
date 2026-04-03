@@ -16,13 +16,25 @@ class ModelRegistry:
     @classmethod
     def load(cls) -> "ModelRegistry":
         models: Dict[str, ModelSpec] = {}
+        candidate_modules: set[str] = set()
 
         for module_info in pkgutil.iter_modules(razecli.models.__path__):
             module_name = module_info.name
             if module_name.startswith("_") or module_name == "base":
                 continue
+            candidate_modules.add(module_name)
 
-            module = importlib.import_module(f"{razecli.models.__name__}.{module_name}")
+        candidate_modules.update(
+            getattr(razecli.models, "BUILTIN_MODEL_MODULES", ())
+        )
+
+        for module_name in sorted(candidate_modules):
+            try:
+                module = importlib.import_module(
+                    f"{razecli.models.__name__}.{module_name}"
+                )
+            except ModuleNotFoundError:
+                continue
             model = getattr(module, "MODEL", None)
             if isinstance(model, ModelSpec):
                 models[model.slug] = model

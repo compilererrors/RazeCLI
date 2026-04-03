@@ -6,10 +6,11 @@ endpoints (currently validated for DA V2 Pro `0x008E`).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import platform
 import time
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from razecli.backends.base import Backend
 from razecli.backends.macos_profiler_backend import MacOSProfilerBackend
@@ -30,6 +31,7 @@ DEFAULT_DPI_WRITE_KEYS = ("0b040100", "0b040000")
 DEFAULT_POLL_READ_KEYS = ("00850001", "00850000", "0b850100")
 DEFAULT_POLL_WRITE_KEYS = ("00050001", "00050000", "0b050100")
 PRIMARY_VENDOR_READ_CHAR_UUID = "52401525-f97c-7f90-0e7f-6c6f4e36db1c"
+BATTERY_LEVEL_CHAR_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 POLL_RATE_TO_CODE = {
     1000: 0x01,
     500: 0x02,
@@ -973,7 +975,26 @@ class MacOSBleBackend(Backend):
         return active_stage, stages
 
     def set_dpi_stages(self, device: DetectedDevice, active_stage: int, stages: Sequence[Tuple[int, int]]) -> None:
+        stages_list = list(stages)
         handle = self._device_handle(device)
+        if int(device.product_id) == 0x008E and len(stages_list) > 1:
+            current_count = 0
+            cached = handle.get("ble_cached_stages")
+            if isinstance(cached, list):
+                current_count = len(cached)
+            if current_count <= 0:
+                try:
+                    _active_cur, current_stages, _stage_ids_cur, _marker_cur = self._read_dpi_stages_with_metadata(device)
+                    current_count = len(list(current_stages))
+                except Exception:
+                    current_count = 0
+            if current_count <= 1:
+                raise CapabilityUnsupportedError(
+                    "Device currently reports a single BLE DPI profile. "
+                    "Adding extra profiles is not mapped reliably on 1532:008E over BLE yet. "
+                    "Use USB/2.4 mode to create multi-profile tables, then return to BLE."
+                )
+
         stage_ids_hint = handle.get("ble_stage_ids")
         marker = int(handle.get("ble_stage_marker") or 0)
         if not isinstance(stage_ids_hint, list) or not stage_ids_hint:
@@ -985,7 +1006,7 @@ class MacOSBleBackend(Backend):
 
         payload = self._build_stages_write_payload(
             active_stage=int(active_stage),
-            stages=stages,
+            stages=stages_list,
             stage_ids_hint=[int(value) for value in stage_ids_hint],
             marker=marker,
         )
@@ -1010,9 +1031,9 @@ class MacOSBleBackend(Backend):
             raise CapabilityUnsupportedError(
                 f"DPI profile write over BLE failed. Tried keys: {attempted}"
             ) from last_exc
-        handle["ble_stage_ids"] = [int(value) for value in stage_ids_hint][: len(stages)]
+        handle["ble_stage_ids"] = [int(value) for value in stage_ids_hint][: len(stages_list)]
         handle["ble_stage_marker"] = int(marker)
-        handle["ble_cached_stages"] = [[int(x), int(y)] for (x, y) in stages]
+        handle["ble_cached_stages"] = [[int(x), int(y)] for (x, y) in stages_list]
         handle["ble_cached_active_stage"] = int(active_stage)
 
     def get_poll_rate(self, device: DetectedDevice) -> int:
@@ -1069,7 +1090,82 @@ class MacOSBleBackend(Backend):
         _ = device
         return [125, 500, 1000]
 
+    async def _read_standard_battery_level_async(
+        self,
+        *,
+        address: Optional[str],
+        name_query: str,
+        timeout: float,
+    ) -> Optional[int]:
+        try:
+            from bleak import BleakClient  # type: ignore
+            from razecli.ble_probe import _auto_resolve_corebluetooth_address, _resolve_device_async
+        except Exception:
+            return None
+
+        connect_target: Any = None
+        if address and self._is_mac_address(address):
+            try:
+                auto = await _auto_resolve_corebluetooth_address(
+                    mac_address=address,
+                    timeout=timeout,
+                )
+            except Exception:
+                auto = {}
+            resolved_device = auto.get("resolved_device")
+            resolved_address = str(auto.get("resolved_address") or "").strip()
+            if resolved_device is not None:
+                connect_target = resolved_device
+            elif resolved_address:
+                connect_target = resolved_address
+            else:
+                connect_target = address
+        else:
+            try:
+                connect_target = await _resolve_device_async(
+                    address=address,
+                    name_query=name_query,
+                    timeout=timeout,
+                )
+            except Exception:
+                return None
+
+        if connect_target is None:
+            return None
+
+        try:
+            async with BleakClient(connect_target, timeout=timeout) as client:
+                value = await client.read_gatt_char(BATTERY_LEVEL_CHAR_UUID)
+        except Exception:
+            return None
+
+        data = bytes(value or b"")
+        if not data:
+            return None
+        level = int(data[0])
+        if 0 <= level <= 100:
+            return int(level)
+        return None
+
+    def _read_standard_battery_level(self, device: DetectedDevice) -> Optional[int]:
+        address, name_query = self._resolve_target(device)
+        timeout = self._backend_timeout()
+        try:
+            return asyncio.run(
+                self._read_standard_battery_level_async(
+                    address=address,
+                    name_query=name_query,
+                    timeout=timeout,
+                )
+            )
+        except Exception:
+            return None
+
     def get_battery(self, device: DetectedDevice) -> int:
+        standard_level = self._read_standard_battery_level(device)
+        if standard_level is not None:
+            return int(standard_level)
+
         attempts: List[Tuple[bytes, str]] = [
             (KEY_BATTERY_RAW_READ, "raw"),
             (KEY_BATTERY_STATUS_READ, "status"),

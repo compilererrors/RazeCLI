@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from razecli.model_registry import ModelRegistry
 
@@ -50,6 +51,15 @@ class ModelRegistryTest(unittest.TestCase):
         self.assertIsNotNone(basilisk_x)
         assert basilisk_x is not None
         self.assertIn((0x1532, 0x0083), basilisk_x.usb_ids)
+
+    def test_loads_builtin_modules_when_pkgutil_is_empty(self):
+        with patch("razecli.model_registry.pkgutil.iter_modules", return_value=[]):
+            registry = ModelRegistry.load()
+
+        model = registry.get("deathadder-v2-pro")
+        self.assertIsNotNone(model)
+        assert model is not None
+        self.assertEqual(model.name, "Razer DeathAdder V2 Pro")
 
 
 if __name__ == "__main__":

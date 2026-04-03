@@ -1,9 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
 hiddenimports = []
+hiddenimports += collect_submodules('razecli.models')
+hiddenimports += collect_submodules('razecli.backends')
+hiddenimports += collect_submodules('razecli.ble')
 tmp_ret = collect_all('hid')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

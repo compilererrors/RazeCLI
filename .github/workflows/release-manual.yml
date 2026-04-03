@@ -213,8 +213,14 @@ jobs:
           git commit -m "${title}"
           git push origin "${branch}" --force-with-lease
 
+          pr_url="https://github.com/${{ github.repository }}/pull/new/${branch}"
           if gh pr view "${branch}" --json number >/dev/null 2>&1; then
-            gh pr edit "${branch}" --title "${title}" --body "${body}"
+            if ! gh pr edit "${branch}" --title "${title}" --body "${body}"; then
+              echo "::warning::Could not update PR metadata automatically. Review manually: ${pr_url}"
+            fi
           else
-            gh pr create --base "${{ github.ref_name }}" --head "${branch}" --title "${title}" --body "${body}"
+            if ! gh pr create --base "${{ github.ref_name }}" --head "${branch}" --title "${title}" --body "${body}"; then
+              echo "::warning::GitHub Actions cannot create PR in this repository. Open manually: ${pr_url}"
+              echo "::warning::If you want auto-PR creation, enable: Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests."
+            fi
           fi

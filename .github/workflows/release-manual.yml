@@ -22,6 +22,11 @@ on:
         required: true
         default: false
         type: boolean
+      update_readme:
+        description: Open PR to update README Homebrew URL to new tag
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: manual-release
@@ -179,7 +184,7 @@ jobs:
             Homebrew formula asset: razecli.rb
 
       - name: Update README release tag URL
-        if: ${{ inputs.publish }}
+        if: ${{ inputs.publish && inputs.update_readme }}
         shell: bash
         run: |
           set -euo pipefail
@@ -190,7 +195,7 @@ jobs:
           git diff -- README.md || true
 
       - name: Commit README change and open PR
-        if: ${{ inputs.publish }}
+        if: ${{ inputs.publish && inputs.update_readme }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

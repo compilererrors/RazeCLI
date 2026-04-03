@@ -7,6 +7,7 @@ Current focus is practical settings: DPI, DPI stages, poll-rate, and battery whe
 RGB and button mapping now run hardware-first on supported backends (currently experimental on `macos-ble` for DA V2 Pro), with local fallback persistence when unsupported.
 
 ![RazeCLI TUI screenshot](assets/tuiScreenShot.png)
+![RazeCLI CLI screenshot](assets/cliScreenShot.png)
 
 Supported models:
 - `deathadder-v2-pro` (`1532:007C`, `1532:007D`, `1532:008E`)

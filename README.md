@@ -158,14 +158,29 @@ Option 3 (fast local executable): build an onedir bundle (larger output, much fa
 `onedir` starts faster because it does not self-extract on each launch.  
 `onefile` is easier to share because it ships as a single executable file.
 
-Option 4 (no venv, Homebrew from release asset):
+Option 4 (no venv, install latest release binary):
 
 ```bash
-brew install --formula "https://github.com/compilererrors/RazeCLI/releases/latest/download/razecli.rb"
+./scripts/install_latest_release_binary.sh
 razecli --help
 ```
 
-This Homebrew path installs the packaged `onedir` asset from the latest release.
+The installer downloads the latest packaged `onedir` binary and prompts:
+- `1` to install at `~/bin/razecli`
+- `2` to enter a custom install path
+
+Direct install link (run from anywhere):
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/compilererrors/RazeCLI/main/scripts/install_latest_release_binary.sh" | bash
+```
+
+Non-interactive custom path:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/compilererrors/RazeCLI/main/scripts/install_latest_release_binary.sh" \
+  | RAZECLI_INSTALL_PATH="$HOME/.local/bin/razecli" bash
+```
 
 ## Usage
 

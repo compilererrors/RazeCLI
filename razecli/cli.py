@@ -96,6 +96,17 @@ def build_parser() -> argparse.ArgumentParser:
     dpi_set.add_argument("--y", type=int, help="Y-axis DPI (defaults to X)")
     _add_target_args(dpi_set)
 
+    quick_set = subparsers.add_parser(
+        "set",
+        help="Quick-set DPI on both axes",
+    )
+    quick_set.add_argument(
+        "dpi",
+        type=int,
+        help="DPI value applied to both X and Y axes",
+    )
+    _add_target_args(quick_set)
+
     dpi_stages_parser = subparsers.add_parser("dpi-stages", help="Read or edit DPI profiles")
     dpi_stages_sub = dpi_stages_parser.add_subparsers(dest="dpi_stages_command", required=True)
 
@@ -515,6 +526,11 @@ def run(args: argparse.Namespace) -> int:
         from razecli.cli_dpi import handle_dpi
 
         return handle_dpi(service, args)
+
+    if args.command == "set":
+        from razecli.cli_dpi import handle_dpi_quick_set
+
+        return handle_dpi_quick_set(service, args)
 
     if args.command == "dpi-stages":
         from razecli.cli_dpi_stages import handle_dpi_stages

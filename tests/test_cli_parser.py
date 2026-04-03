@@ -53,6 +53,13 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.active, 2)
         self.assertEqual(args.stage, ["800:800", "1600:1600"])
 
+    def test_quick_set_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(["set", "1500", "--model", "deathadder-v2-pro"])
+        self.assertEqual(args.command, "set")
+        self.assertEqual(args.dpi, 1500)
+        self.assertEqual(args.model, "deathadder-v2-pro")
+
     def test_dpi_stages_preset_load_parse(self):
         parser = build_parser()
         args = parser.parse_args(

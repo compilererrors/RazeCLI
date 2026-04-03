@@ -161,7 +161,7 @@ Option 3 (fast local executable): build an onedir bundle (larger output, much fa
 Option 4 (no venv, Homebrew from release asset):
 
 ```bash
-brew install --formula "https://github.com/compilererrors/RazeCLI/releases/download/<tag>/razecli.rb"
+brew install --formula "https://github.com/compilererrors/RazeCLI/releases/download/v0.0.1/razecli.rb"
 razecli --help
 ```
 

@@ -11,4 +11,6 @@ MODEL = ModelSpec(
     dpi_min=100,
     dpi_max=20000,
     supported_poll_rates=(125, 500, 1000),
+    ble_poll_rate_supported=False,
+    ble_supported_poll_rates=(),
 )

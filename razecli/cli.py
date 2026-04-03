@@ -342,6 +342,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use write without response (best effort)",
     )
 
+    ble_poll_probe = ble_sub.add_parser(
+        "poll-probe",
+        help="Probe Bluetooth poll-rate keys and show detailed decode diagnostics",
+    )
+    ble_poll_probe.add_argument("--address", help="BLE address/id from `razecli ble scan`")
+    ble_poll_probe.add_argument(
+        "--name",
+        default="DA V2 Pro",
+        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
+    )
+    ble_poll_probe.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Connect/resolve timeout in seconds",
+    )
+    ble_poll_probe.add_argument(
+        "--response-timeout",
+        type=float,
+        default=1.5,
+        help="Wait time in seconds for response notifications",
+    )
+    ble_poll_probe.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help="How many full key rounds to run (default: 1)",
+    )
+    ble_poll_probe.add_argument(
+        "--key",
+        action="append",
+        default=None,
+        help=(
+            "Override poll probe key (4 bytes hex, repeat flag for multiple). "
+            "Example: --key 00850001 --key 0b850100"
+        ),
+    )
+
     ble_alias = ble_sub.add_parser("alias", help="Manage BLE MAC->UUID alias cache")
     ble_alias_sub = ble_alias.add_subparsers(dest="ble_alias_command", required=True)
     ble_alias_sub.add_parser("list", help="List cached MAC->CoreBluetooth UUID aliases")
@@ -408,6 +446,8 @@ def _handle_models(service: DeviceService, as_json: bool) -> int:
                 "dpi_min": model.dpi_min,
                 "dpi_max": model.dpi_max,
                 "supported_poll_rates": list(model.supported_poll_rates),
+                "ble_poll_rate_supported": bool(model.ble_poll_rate_supported),
+                "ble_supported_poll_rates": list(model.ble_supported_poll_rates),
             }
             for model in models
         ]
@@ -425,6 +465,9 @@ def _handle_models(service: DeviceService, as_json: bool) -> int:
             print(f"  DPI range: {model.dpi_min or '?'}-{model.dpi_max or '?'}")
         if model.supported_poll_rates:
             print(f"  Poll rates: {', '.join(str(rate) for rate in model.supported_poll_rates)}")
+        print(f"  BLE poll-rate: {'yes' if model.ble_poll_rate_supported else 'no'}")
+        if model.ble_supported_poll_rates:
+            print(f"  BLE poll rates: {', '.join(str(rate) for rate in model.ble_supported_poll_rates)}")
 
     return 0
 

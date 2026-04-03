@@ -171,6 +171,118 @@ class CliJsonContractTest(unittest.TestCase):
         finally:
             cli_ble_mod.scan_ble_devices = original_scan
 
+    def test_ble_poll_probe_json_contract(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        original_alias_resolve = cli_ble_mod.ble_alias_resolve
+        cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {
+            "vendor_decode": {"status": "success", "status_code": 2, "payload_hex": "01"}
+        }
+        cli_ble_mod.ble_alias_resolve = lambda **_kwargs: {
+            "requested_mac": "02:11:22:33:44:55",
+            "resolved_address": "AABBCCDD-0011-2233-4455-66778899AABB",
+        }
+        args = argparse.Namespace(
+            ble_command="poll-probe",
+            address="02:11:22:33:44:55",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=["00850001"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["decoded_hz"], 1000)
+            self.assertEqual(payload["keys"], ["00850001"])
+            self.assertEqual(len(payload["results"]), 1)
+            self.assertEqual(payload["results"][0]["decoded_hz"], 1000)
+            self.assertEqual(
+                payload["auto_resolution"]["resolved_address"],
+                "AABBCCDD-0011-2233-4455-66778899AABB",
+            )
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+            cli_ble_mod.ble_alias_resolve = original_alias_resolve
+
+    def test_ble_poll_probe_reports_unsupported_on_parameter_error(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {
+            "vendor_decode": {"status": "parameter-error", "status_code": 5, "payload_hex": ""}
+        }
+        args = argparse.Namespace(
+            ble_command="poll-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=["00850001"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "unsupported")
+            self.assertIsNone(payload["decoded_hz"])
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_poll_probe_falls_back_from_resolved_uuid_to_mac(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        original_alias_resolve = cli_ble_mod.ble_alias_resolve
+        cli_ble_mod.ble_alias_resolve = lambda **_kwargs: {
+            "requested_mac": "02:11:22:33:44:55",
+            "resolved_address": "AABBCCDD-0011-2233-4455-66778899AABB",
+        }
+
+        calls = {"addresses": []}
+
+        def _vendor(**kwargs):
+            address = kwargs.get("address")
+            calls["addresses"].append(address)
+            if str(address) == "AABBCCDD-0011-2233-4455-66778899AABB":
+                raise RuntimeError(
+                    "BLE raw transceive failed for AABBCCDD-0011-2233-4455-66778899AABB: "
+                    "Device with address AABBCCDD-0011-2233-4455-66778899AABB was not found"
+                )
+            return {"vendor_decode": {"status": "success", "status_code": 2, "payload_hex": "01"}}
+
+        cli_ble_mod.ble_vendor_transceive = _vendor
+        args = argparse.Namespace(
+            ble_command="poll-probe",
+            address="02:11:22:33:44:55",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=["00850001"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["decoded_hz"], 1000)
+            self.assertTrue(bool(payload["mac_fallback_active"]))
+            self.assertEqual(calls["addresses"][0], "AABBCCDD-0011-2233-4455-66778899AABB")
+            self.assertEqual(calls["addresses"][1], "02:11:22:33:44:55")
+            self.assertEqual(payload["results"][0]["used_fallback_address"], True)
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+            cli_ble_mod.ble_alias_resolve = original_alias_resolve
+
     def test_rgb_set_json_contract(self):
         device = DetectedDevice(
             identifier="rawhid:1532:007C",

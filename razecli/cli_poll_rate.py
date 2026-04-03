@@ -11,10 +11,18 @@ from razecli.cli_common import (
     validate_poll_rate,
 )
 from razecli.device_service import DeviceService
+from razecli.errors import RazeCliError
 
 
 def handle_poll_rate(service: DeviceService, args: argparse.Namespace) -> int:
     device = resolve_target_device(service, args)
+    if "poll-rate" not in device.capabilities:
+        raise RazeCliError(
+            "Selected device/transport does not expose poll-rate. "
+            "Use USB/2.4. "
+            "For experimental Bluetooth probing, set RAZECLI_BLE_POLL_CAP=1 and allow the model via "
+            "RAZECLI_BLE_POLL_SUPPORTED_MODELS (or force with RAZECLI_BLE_POLL_FORCE=1)."
+        )
     backend = service.resolve_backend(device)
 
     if args.poll_command == "get":
@@ -42,4 +50,3 @@ def handle_poll_rate(service: DeviceService, args: argparse.Namespace) -> int:
         as_json=args.json,
     )
     return 0
-

@@ -16,6 +16,10 @@ class ModelSpec:
     dpi_min: Optional[int] = None
     dpi_max: Optional[int] = None
     supported_poll_rates: Sequence[int] = ()
+    # Bluetooth (macos-ble) poll-rate support policy.
+    # Keep disabled unless verified on real hardware/firmware.
+    ble_poll_rate_supported: bool = False
+    ble_supported_poll_rates: Sequence[int] = ()
 
     def matches(self, vendor_id: int, product_id: int) -> bool:
         return (vendor_id, product_id) in self.usb_ids

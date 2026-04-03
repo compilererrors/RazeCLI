@@ -92,6 +92,40 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         self._bt_unavailable_fields: dict[str, tuple[str, ...]] = {}
         self._startup_editor = startup_editor if startup_editor in {"rgb", "button-mapping"} else None
         self._startup_editor_pending = bool(self._startup_editor)
+        self._job_timeout_s = self._env_float(
+            "RAZECLI_TUI_JOB_TIMEOUT",
+            default=8.0,
+            minimum=1.0,
+            maximum=120.0,
+        )
+        self._state_refresh_timeout_s = self._env_float(
+            "RAZECLI_TUI_STATE_REFRESH_TIMEOUT",
+            default=10.0,
+            minimum=1.0,
+            maximum=180.0,
+        )
+        self._discovery_timeout_s = self._env_float(
+            "RAZECLI_TUI_DISCOVERY_TIMEOUT",
+            default=8.0,
+            minimum=1.0,
+            maximum=120.0,
+        )
+        self._state_refresh_retry_delay_s = self._env_float(
+            "RAZECLI_TUI_STATE_REFRESH_RETRY_DELAY",
+            default=2.0,
+            minimum=0.5,
+            maximum=30.0,
+        )
+        self._state_refresh_retry_max = int(
+            self._env_float(
+                "RAZECLI_TUI_STATE_REFRESH_RETRY_MAX",
+                default=1.0,
+                minimum=0.0,
+                maximum=5.0,
+            )
+        )
+        self._state_refresh_retry_attempts = 0
+        self._state_refresh_retry_due_at = 0.0
 
     def _init_theme(self) -> None:
         self._palette = {}
@@ -152,6 +186,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         work: Callable[[], Any],
         on_success: Optional[Callable[[Any], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
+        timeout_s: Optional[float] = None,
     ) -> bool:
         if self._job_label:
             self._set_status(
@@ -161,13 +196,50 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             return False
 
         self._job_label = str(label).strip() or "Working"
+        label_text = self._job_label
+        timeout_value = float(timeout_s) if timeout_s is not None else float(self._job_timeout_s)
         self._set_status(f"{self._job_label}...", hold_seconds=0.4)
 
         def _runner() -> None:
+            done = threading.Event()
+            holder: dict[str, Any] = {"result": None, "error": None}
+
+            def _work_runner() -> None:
+                try:
+                    holder["result"] = work()
+                except Exception as exc:  # pragma: no cover - runtime/hardware dependent
+                    holder["error"] = exc
+                finally:
+                    done.set()
+
+            threading.Thread(
+                target=_work_runner,
+                daemon=True,
+                name=f"razecli-work-{label_text.lower().replace(' ', '-')}",
+            ).start()
+
+            if timeout_value > 0:
+                done.wait(timeout=timeout_value)
+                if not done.is_set():
+                    self._job_results.put(
+                        (
+                            False,
+                            TimeoutError(
+                                f"{label_text} timed out after {timeout_value:.1f}s"
+                            ),
+                            on_success,
+                            on_error,
+                        )
+                    )
+                    return
+
             try:
-                result = work()
-                self._job_results.put((True, result, on_success, on_error))
-            except Exception as exc:  # pragma: no cover - runtime/hardware dependent
+                error = holder.get("error")
+                if isinstance(error, Exception):
+                    self._job_results.put((False, error, on_success, on_error))
+                else:
+                    self._job_results.put((True, holder.get("result"), on_success, on_error))
+            except Exception as exc:  # pragma: no cover - defensive
                 self._job_results.put((False, exc, on_success, on_error))
 
         threading.Thread(
@@ -235,6 +307,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                 work=lambda: self._refresh_devices(eager_state=False),
                 on_success=_on_discovery_success,
                 on_error=_on_discovery_error,
+                timeout_s=self._discovery_timeout_s,
             )
             if not started:
                 self._pending_discovery = True
@@ -246,13 +319,38 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             self._pending_state_refresh = False
             self._pending_state_force = False
 
+            def _on_state_success(_result: Any) -> None:
+                self._state_refresh_retry_attempts = 0
+                self._state_refresh_retry_due_at = 0.0
+
             def _on_state_error(exc: Exception) -> None:
-                self._set_status(f"State refresh failed: {exc}", hold_seconds=8.0)
+                message = str(exc)
+                if isinstance(exc, TimeoutError):
+                    if self._state_refresh_retry_attempts < self._state_refresh_retry_max:
+                        self._state_refresh_retry_attempts += 1
+                        self._state_refresh_retry_due_at = time.monotonic() + float(
+                            self._state_refresh_retry_delay_s
+                        )
+                        self._set_status(
+                            "State refresh timed out; "
+                            f"retrying in {self._state_refresh_retry_delay_s:.1f}s "
+                            f"({self._state_refresh_retry_attempts}/{self._state_refresh_retry_max})...",
+                            hold_seconds=max(2.0, float(self._state_refresh_retry_delay_s) + 1.0),
+                        )
+                        return
+                    self._set_status(
+                        f"State refresh timed out ({message}). Press r to retry.",
+                        hold_seconds=10.0,
+                    )
+                    return
+                self._set_status(f"State refresh failed: {message}", hold_seconds=8.0)
 
             started = self._start_background_job(
                 label="Refreshing device state",
                 work=lambda: self._refresh_state(force=force),
+                on_success=_on_state_success,
                 on_error=_on_state_error,
+                timeout_s=self._state_refresh_timeout_s,
             )
             if not started:
                 self._pending_state_refresh = True
@@ -301,7 +399,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             "  g: RGB editor\n"
             "  b: Button-mapping table/editor (manual + capture assist)\n"
             "  s: Next DPI profile\n"
-            "  n: DPI profile editor\n"
+            "  n: DPI levels editor (count, increment, presets)\n"
             "  p: Next poll-rate\n"
             "\n"
             "Layout\n"
@@ -393,6 +491,15 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                     if self._run_pending_io():
                         continue
                     now = time.monotonic()
+                    if (
+                        self._state_refresh_retry_due_at > 0.0
+                        and now >= self._state_refresh_retry_due_at
+                        and not self._job_label
+                        and not self._pending_state_refresh
+                    ):
+                        self._state_refresh_retry_due_at = 0.0
+                        self._queue_state_refresh(force=True)
+                        continue
                     if self._idle_refresh_interval_s > 0 and (
                         now - self._last_idle_refresh_at >= self._idle_refresh_interval_s
                     ):
@@ -451,7 +558,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                     self._cycle_dpi_stage()
                     continue
                 if key == ord("n"):
-                    self._set_dpi_profile_count(stdscr)
+                    self._edit_dpi_levels(stdscr)
                     continue
                 if key == ord("?"):
                     self._show_help(stdscr)

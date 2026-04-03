@@ -284,6 +284,241 @@ class CliJsonContractTest(unittest.TestCase):
             cli_ble_mod.ble_vendor_transceive = original_vendor
             cli_ble_mod.ble_alias_resolve = original_alias_resolve
 
+    def test_ble_bank_probe_json_contract(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        original_alias_resolve = cli_ble_mod.ble_alias_resolve
+        cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {
+            "vendor_decode": {
+                "status": "success",
+                "status_code": 2,
+                "payload_hex": "0101dc05dc050000",
+            }
+        }
+        cli_ble_mod.ble_alias_resolve = lambda **_kwargs: {
+            "requested_mac": "02:11:22:33:44:55",
+            "resolved_address": "AABBCCDD-0011-2233-4455-66778899AABB",
+        }
+        args = argparse.Namespace(
+            ble_command="bank-probe",
+            address="02:11:22:33:44:55",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=["0b840100"],
+            include_write_keys=False,
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["keys"], ["0b840100"])
+            self.assertEqual(len(payload["results"]), 1)
+            self.assertEqual(payload["results"][0]["decoded_bank"]["active_stage"], 1)
+            self.assertEqual(payload["results"][0]["decoded_bank"]["stages_count"], 1)
+            self.assertEqual(payload["results"][0]["decoded_bank"]["stages"][0]["dpi_x"], 1500)
+            self.assertEqual(len(payload["signatures"]), 1)
+            self.assertEqual(payload["primary_bank_signature"], payload["bank_signature"])
+            self.assertEqual(
+                payload["auto_resolution"]["resolved_address"],
+                "AABBCCDD-0011-2233-4455-66778899AABB",
+            )
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+            cli_ble_mod.ble_alias_resolve = original_alias_resolve
+
+    def test_ble_bank_snapshot_json_contract(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {
+            "vendor_decode": {
+                "status": "success",
+                "status_code": 2,
+                "payload_hex": "0101dc05dc050000",
+            }
+        }
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                snapshot_path = str(Path(tmp_dir) / "bank_snapshots.json")
+                args = argparse.Namespace(
+                    ble_command="bank-snapshot",
+                    address="AABBCCDD-0011-2233-4455-66778899AABB",
+                    name="DA V2 Pro",
+                    timeout=5.0,
+                    response_timeout=1.0,
+                    attempts=1,
+                    key=["0b840100"],
+                    include_write_keys=False,
+                    label="green-led-bank",
+                    path=snapshot_path,
+                    json=True,
+                )
+
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cli_ble_mod.handle_ble(args)
+                self.assertEqual(rc, 0)
+                payload = json.loads(buf.getvalue())
+                self.assertEqual(payload["status"], "ok")
+                self.assertIn("snapshot", payload)
+                self.assertEqual(payload["snapshot"]["path"], snapshot_path)
+                self.assertEqual(payload["snapshot"]["count"], 1)
+                self.assertEqual(payload["snapshot"]["label"], "green-led-bank")
+
+                with open(snapshot_path, "r", encoding="utf-8") as fh:
+                    stored = json.load(fh)
+                self.assertIn("snapshots", stored)
+                self.assertEqual(len(stored["snapshots"]), 1)
+                self.assertEqual(stored["snapshots"][0]["label"], "green-led-bank")
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_bank_probe_deep_uses_extended_default_keys(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+
+        def _vendor(**_kwargs):
+            return {
+                "vendor_decode": {
+                    "status": "parameter-error",
+                    "status_code": 5,
+                    "payload_hex": "",
+                }
+            }
+
+        cli_ble_mod.ble_vendor_transceive = _vendor
+        args = argparse.Namespace(
+            ble_command="bank-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=2,
+            key=None,
+            deep=True,
+            include_write_keys=False,
+            settle_delay=None,
+            reconnect_each_round=None,
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertTrue(payload.get("deep"))
+            self.assertEqual(payload["status"], "unsupported")
+            self.assertIn("0b840100", payload["keys"])
+            self.assertNotIn("0b040100", payload["keys"])
+            self.assertGreater(len(payload["keys"]), 2)
+            self.assertFalse(bool(payload.get("include_write_keys")))
+            self.assertFalse(bool(payload.get("write_keys_included")))
+            self.assertGreater(payload.get("settle_delay_s", 0.0), 0.0)
+            self.assertTrue(bool(payload.get("reconnect_each_round")))
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_bank_probe_deep_include_write_keys(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+
+        def _vendor(**_kwargs):
+            return {
+                "vendor_decode": {
+                    "status": "parameter-error",
+                    "status_code": 5,
+                    "payload_hex": "",
+                }
+            }
+
+        cli_ble_mod.ble_vendor_transceive = _vendor
+        args = argparse.Namespace(
+            ble_command="bank-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=None,
+            deep=True,
+            include_write_keys=True,
+            settle_delay=None,
+            reconnect_each_round=None,
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertTrue(payload.get("deep"))
+            self.assertTrue(bool(payload.get("include_write_keys")))
+            self.assertIn("0b040100", payload["keys"])
+            self.assertTrue(bool(payload.get("write_keys_included")))
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_bank_compare_json_contract(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            snapshot_path = Path(tmp_dir) / "bank_snapshots.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshots": [
+                            {
+                                "captured_at": "2026-04-03T19:00:00+00:00",
+                                "label": "bank-a",
+                                "status": "ok",
+                                "primary_bank_signature": "sig-a",
+                                "signatures": [
+                                    {
+                                        "stages": [
+                                            {"index": 1, "dpi_x": 800, "dpi_y": 800, "stage_id": 1}
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "captured_at": "2026-04-03T19:01:00+00:00",
+                                "label": "bank-b",
+                                "status": "ok",
+                                "primary_bank_signature": "sig-b",
+                                "signatures": [
+                                    {
+                                        "stages": [
+                                            {"index": 1, "dpi_x": 2200, "dpi_y": 2200, "stage_id": 1}
+                                        ]
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            args = argparse.Namespace(
+                ble_command="bank-compare",
+                label_a="bank-a",
+                label_b="bank-b",
+                path=str(snapshot_path),
+                json=True,
+            )
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "different")
+            self.assertFalse(payload["signature_equal"])
+            self.assertEqual(payload["snapshot_a"]["primary_bank_signature"], "sig-a")
+            self.assertEqual(payload["snapshot_b"]["primary_bank_signature"], "sig-b")
+            self.assertEqual(len(payload["stage_differences"]), 1)
+
     def test_rgb_set_json_contract(self):
         device = DetectedDevice(
             identifier="rawhid:1532:007C",

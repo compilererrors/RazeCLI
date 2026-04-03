@@ -510,7 +510,7 @@ class TuiViewMixin:
         selected = self._selected()
         poll_hint = "  [p] poll-rate" if bool(selected and "poll-rate" in selected.capabilities) else ""
         actions_secondary = (
-            f"Edit: [+/-] DPI  [d] custom  [s] next profile  [n] profile count{poll_hint}  [[/]] split"
+            f"Edit: [+/-] DPI  [d] custom  [s] next profile  [n] DPI levels{poll_hint}  [[/]] split"
         )
         self._safe_add(stdscr, height - 3, pad_x, actions_primary, self._ui_attr("footer", curses.A_BOLD))
         self._safe_add(stdscr, height - 2, pad_x, actions_secondary, self._ui_attr("footer", curses.A_BOLD))

@@ -760,6 +760,28 @@ class MacOSBleBackend(Backend):
             value = 0.12
         return max(0.0, min(1.5, value))
 
+    @staticmethod
+    def _rgb_write_attempts() -> int:
+        raw = str(os.getenv("RAZECLI_BLE_RGB_WRITE_ATTEMPTS", "2")).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 2
+        return max(1, min(6, value))
+
+    @staticmethod
+    def _rgb_write_retry_delay() -> float:
+        raw = str(os.getenv("RAZECLI_BLE_RGB_WRITE_RETRY_DELAY", "0.12")).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.12
+        return max(0.0, min(1.5, value))
+
+    @staticmethod
+    def _rgb_verify_write() -> bool:
+        return MacOSBleBackend._env_flag("RAZECLI_BLE_RGB_VERIFY_WRITE", default=True)
+
     def _detect_from_rawhid(self, profiler_rows: Sequence[DetectedDevice]) -> List[DetectedDevice]:
         devices: List[DetectedDevice] = []
         for device in self._rawhid.detect():
@@ -1817,48 +1839,89 @@ class MacOSBleBackend(Backend):
         if mode_value == "off":
             brightness_percent = 0
 
-        if mode_value in {"static", "breathing"}:
-            rgb = bytes.fromhex(color_hex)
-            frame_payload = bytes([0x04, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2]])
-            _ = self._vendor_call(
-                device=device,
-                key=KEY_RGB_FRAME_WRITE,
-                value_payload=frame_payload,
-            )
-
-        selector_payload = self._rgb_mode_selector_payload(mode_value)
-        if selector_payload is not None:
-            _ = self._vendor_call(
-                device=device,
-                key=KEY_RGB_MODE_WRITE,
-                value_payload=selector_payload,
-            )
-
+        attempts = self._rgb_write_attempts()
+        retry_delay = self._rgb_write_retry_delay()
+        verify_write = self._rgb_verify_write()
         brightness_u8 = self._rgb_percent_to_u8(brightness_percent)
         write_keys = self._rgb_brightness_write_keys(handle)
+
         last_err: Optional[Exception] = None
         write_ok = False
-        for key in write_keys:
+        for attempt in range(attempts):
             try:
-                _ = self._vendor_call(
-                    device=device,
-                    key=key,
-                    value_payload=bytes([brightness_u8]),
-                )
-                handle["ble_rgb_write_key"] = key.hex()
+                if mode_value in {"static", "breathing"}:
+                    rgb = bytes.fromhex(color_hex)
+                    frame_payload = bytes([0x04, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2]])
+                    _ = self._vendor_call(
+                        device=device,
+                        key=KEY_RGB_FRAME_WRITE,
+                        value_payload=frame_payload,
+                    )
+
+                selector_payload = self._rgb_mode_selector_payload(mode_value)
+                if selector_payload is not None:
+                    _ = self._vendor_call(
+                        device=device,
+                        key=KEY_RGB_MODE_WRITE,
+                        value_payload=selector_payload,
+                    )
+
+                wrote_brightness = False
+                brightness_err: Optional[Exception] = None
+                for key in write_keys:
+                    try:
+                        _ = self._vendor_call(
+                            device=device,
+                            key=key,
+                            value_payload=bytes([brightness_u8]),
+                        )
+                        handle["ble_rgb_write_key"] = key.hex()
+                        wrote_brightness = True
+                        break
+                    except Exception as exc:
+                        brightness_err = exc
+                        continue
+                if not wrote_brightness:
+                    if isinstance(brightness_err, Exception):
+                        raise CapabilityUnsupportedError("Could not write RGB brightness over BLE") from brightness_err
+                    raise CapabilityUnsupportedError("Could not write RGB brightness over BLE")
+
+                handle["ble_rgb_mode"] = mode_value
+                handle["ble_rgb_color"] = color_hex
+                handle["ble_rgb_brightness"] = int(brightness_percent)
+
+                if verify_write:
+                    try:
+                        verified = self.get_rgb(device)
+                    except Exception as exc:
+                        raise CapabilityUnsupportedError("Could not verify RGB write over BLE") from exc
+
+                    try:
+                        actual_brightness = int(verified.get("brightness"))
+                    except Exception:
+                        actual_brightness = -1
+                    expected_brightness = int(brightness_percent)
+                    if abs(actual_brightness - expected_brightness) > 2:
+                        raise CapabilityUnsupportedError(
+                            "RGB write verification mismatch over BLE "
+                            f"(expected brightness {expected_brightness}, got {actual_brightness})"
+                        )
+
                 write_ok = True
                 break
             except Exception as exc:
                 last_err = exc
+                self._clear_vendor_path(handle)
+                if attempt + 1 < attempts and retry_delay > 0:
+                    time.sleep(retry_delay * float(attempt + 1))
                 continue
+
         if not write_ok:
             if isinstance(last_err, Exception):
-                raise CapabilityUnsupportedError("Could not write RGB brightness over BLE") from last_err
-            raise CapabilityUnsupportedError("Could not write RGB brightness over BLE")
-
-        handle["ble_rgb_mode"] = mode_value
-        handle["ble_rgb_color"] = color_hex
-        handle["ble_rgb_brightness"] = int(brightness_percent)
+                raise CapabilityUnsupportedError(
+                    f"Could not apply RGB over BLE reliably after {attempts} attempts"
+                ) from last_err
+            raise CapabilityUnsupportedError(f"Could not apply RGB over BLE reliably after {attempts} attempts")
 
         return {
             "mode": mode_value,

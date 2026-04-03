@@ -424,6 +424,191 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    ble_bank_probe = ble_sub.add_parser(
+        "bank-probe",
+        help="Probe BLE DPI-stage keys and fingerprint the currently active onboard bank",
+    )
+    ble_bank_probe.add_argument("--address", help="BLE address/id from `razecli ble scan`")
+    ble_bank_probe.add_argument(
+        "--name",
+        default="DA V2 Pro",
+        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
+    )
+    ble_bank_probe.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Connect/resolve timeout in seconds",
+    )
+    ble_bank_probe.add_argument(
+        "--response-timeout",
+        type=float,
+        default=1.5,
+        help="Wait time in seconds for response notifications",
+    )
+    ble_bank_probe.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help="How many full key rounds to run (default: 1)",
+    )
+    ble_bank_probe.add_argument(
+        "--key",
+        action="append",
+        default=None,
+        help=(
+            "Override bank probe key (4 bytes hex, repeat flag for multiple). "
+            "Example: --key 0b840100 --key 0b840000"
+        ),
+    )
+    ble_bank_probe.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run deeper key sweep to look for explicit bank-id/selector responses",
+    )
+    ble_bank_probe.add_argument(
+        "--include-write-keys",
+        action="store_true",
+        help=(
+            "Include 0x04 bank keys in deep probe. "
+            "Unsafe: may mutate device state/profile table on some firmware."
+        ),
+    )
+    ble_bank_probe.add_argument(
+        "--settle-delay",
+        type=float,
+        default=None,
+        help=(
+            "Optional delay in seconds between probe rounds. "
+            "When omitted, deep mode uses a short settle delay automatically."
+        ),
+    )
+    ble_bank_probe.add_argument(
+        "--reconnect-each-round",
+        dest="reconnect_each_round",
+        action="store_true",
+        default=None,
+        help=(
+            "Re-resolve/reconnect target between rounds. "
+            "Enabled automatically for deep mode unless explicitly disabled."
+        ),
+    )
+    ble_bank_probe.add_argument(
+        "--no-reconnect-each-round",
+        dest="reconnect_each_round",
+        action="store_false",
+        help="Disable reconnect/re-resolve between rounds.",
+    )
+
+    ble_bank_snapshot = ble_sub.add_parser(
+        "bank-snapshot",
+        help="Capture and persist a BLE bank fingerprint snapshot",
+    )
+    ble_bank_snapshot.add_argument("--address", help="BLE address/id from `razecli ble scan`")
+    ble_bank_snapshot.add_argument(
+        "--name",
+        default="DA V2 Pro",
+        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
+    )
+    ble_bank_snapshot.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Connect/resolve timeout in seconds",
+    )
+    ble_bank_snapshot.add_argument(
+        "--response-timeout",
+        type=float,
+        default=1.5,
+        help="Wait time in seconds for response notifications",
+    )
+    ble_bank_snapshot.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help="How many full key rounds to run (default: 1)",
+    )
+    ble_bank_snapshot.add_argument(
+        "--key",
+        action="append",
+        default=None,
+        help=(
+            "Override bank probe key (4 bytes hex, repeat flag for multiple). "
+            "Example: --key 0b840100 --key 0b840000"
+        ),
+    )
+    ble_bank_snapshot.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run deeper key sweep before storing snapshot",
+    )
+    ble_bank_snapshot.add_argument(
+        "--include-write-keys",
+        action="store_true",
+        help=(
+            "Include 0x04 bank keys in deep snapshot probe. "
+            "Unsafe: may mutate device state/profile table on some firmware."
+        ),
+    )
+    ble_bank_snapshot.add_argument(
+        "--settle-delay",
+        type=float,
+        default=None,
+        help=(
+            "Optional delay in seconds between probe rounds. "
+            "When omitted, deep mode uses a short settle delay automatically."
+        ),
+    )
+    ble_bank_snapshot.add_argument(
+        "--reconnect-each-round",
+        dest="reconnect_each_round",
+        action="store_true",
+        default=None,
+        help=(
+            "Re-resolve/reconnect target between rounds. "
+            "Enabled automatically for deep mode unless explicitly disabled."
+        ),
+    )
+    ble_bank_snapshot.add_argument(
+        "--no-reconnect-each-round",
+        dest="reconnect_each_round",
+        action="store_false",
+        help="Disable reconnect/re-resolve between rounds.",
+    )
+    ble_bank_snapshot.add_argument(
+        "--label",
+        help="Optional snapshot label (for example 'green-led-bank')",
+    )
+    ble_bank_snapshot.add_argument(
+        "--path",
+        help=(
+            "Snapshot store JSON path. Defaults to $RAZECLI_BLE_BANK_SNAPSHOT_PATH "
+            "or ~/.config/razecli/ble_bank_snapshots.json"
+        ),
+    )
+
+    ble_bank_compare = ble_sub.add_parser(
+        "bank-compare",
+        help="Compare two saved BLE bank snapshots by label",
+    )
+    ble_bank_compare.add_argument(
+        "--label-a",
+        required=True,
+        help="First snapshot label (latest matching label is used)",
+    )
+    ble_bank_compare.add_argument(
+        "--label-b",
+        required=True,
+        help="Second snapshot label (latest matching label is used)",
+    )
+    ble_bank_compare.add_argument(
+        "--path",
+        help=(
+            "Snapshot store JSON path. Defaults to $RAZECLI_BLE_BANK_SNAPSHOT_PATH "
+            "or ~/.config/razecli/ble_bank_snapshots.json"
+        ),
+    )
+
     ble_alias = ble_sub.add_parser("alias", help="Manage BLE MAC->UUID alias cache")
     ble_alias_sub = ble_alias.add_subparsers(dest="ble_alias_command", required=True)
     ble_alias_sub.add_parser("list", help="List cached MAC->CoreBluetooth UUID aliases")

@@ -12,6 +12,14 @@
 - `008E` (Bluetooth) is discoverable, but HID feature reports may fail (`send_feature_report failed`).
 - The bottom LED/DPI button can switch onboard banks; the same LED color does not always mean the same absolute DPI across transports.
 
+## Terminology (User-facing vs RE terms)
+
+- User-facing term: `onboard profile`.
+- RE/debug term in code/output: `bank`.
+- These are the same concept for this project.
+- `DPI levels` are the steps cycled by the top DPI buttons near the scroll wheel.
+- `Onboard profile`/`bank` is switched by the bottom profile button and can have its own DPI level table and indicator behavior.
+
 ## Code Building Blocks
 
 - `razecli/backends/macos_ble_backend.py`

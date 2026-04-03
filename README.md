@@ -517,6 +517,11 @@ Set them only after validated hardware captures for that specific model/firmware
 
 ## Additional Notes
 
+- Terminology for users:
+  - `DPI levels` = the DPI steps you cycle with the top DPI buttons near the scroll wheel.
+  - `Onboard profile` (sometimes called `bank` in RE/debug output) = the profile slot you switch with the bottom profile button.
+  - Each onboard profile can keep its own DPI level table, active DPI level, and LED/profile indicator behavior.
+  - In practice: first select onboard profile with the bottom button, then edit DPI levels for that profile.
 - Backend auto-priority is `rawhid` > `macos-ble` > `hidapi` > `macos-profiler`.
 - If multiple devices match, pass `--device`.
 - `rawhid` collapses transport variants by default (priority: USB > dongle > BT). Use `--all-transports` to see each endpoint.

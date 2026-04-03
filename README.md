@@ -169,6 +169,8 @@ The installer downloads the latest packaged `onedir` binary and prompts:
 - `1` to install at `~/bin/razecli`
 - `2` to enter a custom install path
 It installs a `razecli` launcher plus the required bundled runtime directory.
+No system Python is required on the target Mac.
+The release binary includes BLE runtime dependencies (`bleak`) for `macos-ble` commands.
 
 Direct install link (run from anywhere):
 
@@ -182,6 +184,10 @@ Non-interactive custom path:
 curl -fsSL "https://raw.githubusercontent.com/compilererrors/RazeCLI/main/scripts/install_latest_release_binary.sh" \
   | RAZECLI_INSTALL_PATH="$HOME/.local/bin/razecli" bash
 ```
+
+Architecture handling:
+- Apple Silicon (`arm64`) downloads `razecli-onedir-macos-arm64.tar.gz`
+- Intel (`x86_64`) downloads `razecli-onedir-macos-x86_64.tar.gz`
 
 ## Usage
 

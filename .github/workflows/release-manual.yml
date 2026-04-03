@@ -28,21 +28,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
-    permissions:
-      contents: write
-
+  derive-version:
+    runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.version.outputs.latest }}
+      next: ${{ steps.version.outputs.next }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55
-        with:
-          python-version: "3.11"
 
       - name: Derive next version tag
         id: version
@@ -94,6 +89,31 @@ jobs:
           echo "next=${next}" >> "$GITHUB_OUTPUT"
           echo "Computed next tag: ${next}"
 
+  build-macos:
+    needs: derive-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55
+        with:
+          python-version: "3.11"
+
       - name: Create virtualenv
         run: python -m venv .venv
 
@@ -103,32 +123,21 @@ jobs:
       - name: Build macOS onedir bundle (fast startup)
         run: ./scripts/build_macos_onedir.sh
 
-      - name: Package onedir bundle for Homebrew
+      - name: Rename and package artifacts
         shell: bash
         run: |
           set -euo pipefail
-          tar -C dist -czf dist/razecli-onedir-macos-arm64.tar.gz razecli-onedir
+          mv dist/razecli "dist/razecli-macos-${{ matrix.arch }}"
+          tar -C dist -czf "dist/razecli-onedir-macos-${{ matrix.arch }}.tar.gz" razecli-onedir
 
       - name: Create SHA256 checksums
         shell: bash
         run: |
-          shasum -a 256 dist/razecli > dist/razecli.sha256
-          shasum -a 256 dist/razecli-onedir-macos-arm64.tar.gz > dist/razecli-onedir-macos-arm64.tar.gz.sha256
-          cat dist/razecli.sha256
-          cat dist/razecli-onedir-macos-arm64.tar.gz.sha256
-
-      - name: Generate Homebrew formula artifact
-        shell: bash
-        run: |
           set -euo pipefail
-          onedir_sha="$(awk '{print $1}' dist/razecli-onedir-macos-arm64.tar.gz.sha256)"
-          .venv/bin/python scripts/generate_homebrew_formula.py \
-            --repository "${{ github.repository }}" \
-            --tag "${{ steps.version.outputs.next }}" \
-            --asset-name "razecli-onedir-macos-arm64.tar.gz" \
-            --asset-sha256 "${onedir_sha}" \
-            --out "dist/razecli.rb"
-          cat dist/razecli.rb
+          shasum -a 256 "dist/razecli-macos-${{ matrix.arch }}" > "dist/razecli-macos-${{ matrix.arch }}.sha256"
+          shasum -a 256 "dist/razecli-onedir-macos-${{ matrix.arch }}.tar.gz" > "dist/razecli-onedir-macos-${{ matrix.arch }}.tar.gz.sha256"
+          cat "dist/razecli-macos-${{ matrix.arch }}.sha256"
+          cat "dist/razecli-onedir-macos-${{ matrix.arch }}.tar.gz.sha256"
 
       - name: Run unit tests
         if: ${{ inputs.run_tests }}
@@ -137,42 +146,101 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: razecli-macos-${{ steps.version.outputs.next }}
+          name: razecli-macos-${{ matrix.arch }}-${{ needs.derive-version.outputs.next }}
           path: |
-            dist/razecli
-            dist/razecli.sha256
-            dist/razecli-onedir-macos-arm64.tar.gz
-            dist/razecli-onedir-macos-arm64.tar.gz.sha256
-            dist/razecli.rb
+            dist/razecli-macos-${{ matrix.arch }}
+            dist/razecli-macos-${{ matrix.arch }}.sha256
+            dist/razecli-onedir-macos-${{ matrix.arch }}.tar.gz
+            dist/razecli-onedir-macos-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
-      - name: Create and push tag
-        if: ${{ inputs.publish }}
+  publish-release:
+    needs:
+      - derive-version
+      - build-macos
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55
+        with:
+          python-version: "3.11"
+
+      - name: Download arm64 artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: razecli-macos-arm64-${{ needs.derive-version.outputs.next }}
+          path: dist/arm64
+
+      - name: Download x86_64 artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: razecli-macos-x86_64-${{ needs.derive-version.outputs.next }}
+          path: dist/x86_64
+
+      - name: Prepare release files
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.next }}"
+          cp dist/arm64/* dist/
+          cp dist/x86_64/* dist/
+          ls -la dist
+
+      - name: Generate Homebrew formula artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          arm_sha="$(awk '{print $1}' dist/razecli-onedir-macos-arm64.tar.gz.sha256)"
+          x86_sha="$(awk '{print $1}' dist/razecli-onedir-macos-x86_64.tar.gz.sha256)"
+          python scripts/generate_homebrew_formula.py \
+            --repository "${{ github.repository }}" \
+            --tag "${{ needs.derive-version.outputs.next }}" \
+            --asset-name-arm64 "razecli-onedir-macos-arm64.tar.gz" \
+            --asset-sha256-arm64 "${arm_sha}" \
+            --asset-name-x86-64 "razecli-onedir-macos-x86_64.tar.gz" \
+            --asset-sha256-x86-64 "${x86_sha}" \
+            --out "dist/razecli.rb"
+          cat dist/razecli.rb
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.derive-version.outputs.next }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "${tag}" -m "Release ${tag}"
           git push origin "${tag}"
 
       - name: Publish GitHub Release
-        if: ${{ inputs.publish }}
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
         with:
-          tag_name: ${{ steps.version.outputs.next }}
-          name: ${{ steps.version.outputs.next }}
+          tag_name: ${{ needs.derive-version.outputs.next }}
+          name: ${{ needs.derive-version.outputs.next }}
           files: |
-            dist/razecli
-            dist/razecli.sha256
+            dist/razecli-macos-arm64
+            dist/razecli-macos-arm64.sha256
             dist/razecli-onedir-macos-arm64.tar.gz
             dist/razecli-onedir-macos-arm64.tar.gz.sha256
+            dist/razecli-macos-x86_64
+            dist/razecli-macos-x86_64.sha256
+            dist/razecli-onedir-macos-x86_64.tar.gz
+            dist/razecli-onedir-macos-x86_64.tar.gz.sha256
             dist/razecli.rb
           body: |
             Automated manual release build.
 
-            Previous tag: ${{ steps.version.outputs.latest }}
+            Previous tag: ${{ needs.derive-version.outputs.latest }}
             Bump: ${{ inputs.bump }}
-            Homebrew formula asset: razecli.rb
+            Included binaries:
+            - macOS arm64
+            - macOS x86_64

@@ -2,10 +2,31 @@
 set -euo pipefail
 
 REPOSITORY="${RAZECLI_REPOSITORY:-compilererrors/RazeCLI}"
-ASSET_NAME="${RAZECLI_ASSET_NAME:-razecli-onedir-macos-arm64.tar.gz}"
-DOWNLOAD_URL="https://github.com/${REPOSITORY}/releases/latest/download/${ASSET_NAME}"
 INSTALL_CHOICE="${RAZECLI_INSTALL_CHOICE:-}"
 INSTALL_PATH="${RAZECLI_INSTALL_PATH:-}"
+OS_NAME="$(uname -s)"
+CPU_ARCH_RAW="$(uname -m)"
+
+if [[ "${OS_NAME}" != "Darwin" ]]; then
+  echo "Error: this installer currently supports macOS only." >&2
+  exit 1
+fi
+
+case "${CPU_ARCH_RAW}" in
+  arm64 | aarch64)
+    ASSET_ARCH="arm64"
+    ;;
+  x86_64 | amd64)
+    ASSET_ARCH="x86_64"
+    ;;
+  *)
+    echo "Error: unsupported macOS architecture '${CPU_ARCH_RAW}'." >&2
+    exit 1
+    ;;
+esac
+
+ASSET_NAME="${RAZECLI_ASSET_NAME:-razecli-onedir-macos-${ASSET_ARCH}.tar.gz}"
+DOWNLOAD_URL="https://github.com/${REPOSITORY}/releases/latest/download/${ASSET_NAME}"
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -32,7 +53,12 @@ _read_prompt() {
 
 echo "Downloading latest release asset:"
 echo "  ${DOWNLOAD_URL}"
-curl -fsSL -o "${tmp_dir}/${ASSET_NAME}" "${DOWNLOAD_URL}"
+if ! curl -fsSL -o "${tmp_dir}/${ASSET_NAME}" "${DOWNLOAD_URL}"; then
+  echo "Error: failed to download '${ASSET_NAME}' from latest release." >&2
+  echo "Detected architecture: ${CPU_ARCH_RAW}" >&2
+  echo "If this is an older release, it might not include this architecture yet." >&2
+  exit 1
+fi
 
 tar -xzf "${tmp_dir}/${ASSET_NAME}" -C "${tmp_dir}"
 source_bundle_dir="${tmp_dir}/razecli-onedir"

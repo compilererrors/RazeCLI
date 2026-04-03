@@ -32,15 +32,16 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55
         with:
           python-version: "3.11"
 
@@ -134,34 +135,8 @@ jobs:
         if: ${{ inputs.run_tests }}
         run: .venv/bin/python -m unittest discover -s tests -q
 
-      - name: Update README release tag URL
-        if: ${{ inputs.publish }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          .venv/bin/python scripts/update_readme_release_tag.py \
-            --readme README.md \
-            --repository "${{ github.repository }}" \
-            --tag "${{ steps.version.outputs.next }}"
-          git diff -- README.md || true
-
-      - name: Commit README update
-        if: ${{ inputs.publish }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- README.md; then
-            echo "README already points to current release tag."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git commit -m "docs: update Homebrew release URL to ${{ steps.version.outputs.next }}"
-          git push origin "HEAD:${{ github.ref_name }}"
-
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: razecli-macos-${{ steps.version.outputs.next }}
           path: |
@@ -186,7 +161,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: ${{ inputs.publish }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
         with:
           tag_name: ${{ steps.version.outputs.next }}
           name: ${{ steps.version.outputs.next }}
@@ -202,3 +177,44 @@ jobs:
             Previous tag: ${{ steps.version.outputs.latest }}
             Bump: ${{ inputs.bump }}
             Homebrew formula asset: razecli.rb
+
+      - name: Update README release tag URL
+        if: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/python scripts/update_readme_release_tag.py \
+            --readme README.md \
+            --repository "${{ github.repository }}" \
+            --tag "${{ steps.version.outputs.next }}"
+          git diff -- README.md || true
+
+      - name: Commit README change and open PR
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- README.md; then
+            echo "README already points to current release tag."
+            exit 0
+          fi
+
+          tag="${{ steps.version.outputs.next }}"
+          branch="chore/readme-release-url-${tag}"
+          title="docs: update Homebrew release URL to ${tag}"
+          body=$'Automated README update from Manual Release workflow.\n\n- Release tag: '"${tag}"$'\n- Updated Homebrew formula URL in README.'
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git add README.md
+          git commit -m "${title}"
+          git push origin "${branch}" --force-with-lease
+
+          if gh pr view "${branch}" --json number >/dev/null 2>&1; then
+            gh pr edit "${branch}" --title "${title}" --body "${body}"
+          else
+            gh pr create --base "${{ github.ref_name }}" --head "${branch}" --title "${title}" --body "${body}"
+          fi

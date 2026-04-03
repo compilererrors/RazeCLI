@@ -167,7 +167,7 @@ razecli --help
 
 Use a real release tag (for example `v0.1.2`) in the URL.  
 This Homebrew path installs the packaged `onedir` asset for faster startup than onefile.
-The `Manual Release` GitHub Action updates this README URL to the newly published tag automatically.
+The `Manual Release` GitHub Action opens a PR that updates this README URL to the newly published tag.
 
 ## Usage
 

@@ -175,7 +175,7 @@ No system Python is required on the target Mac.
 The release binary includes BLE runtime dependencies (`bleak`) for `macos-ble` commands.
 
 Direct install link (run from anywhere):
-
+NOTE: Don't use the curl installs, do a local install until I have sorted out why releases fail. Probably due to some missing deps.
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/compilererrors/RazeCLI/main/scripts/install_latest_release_binary.sh" | bash
 ```

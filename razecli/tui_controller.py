@@ -189,16 +189,18 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         timeout_s: Optional[float] = None,
     ) -> bool:
         if self._job_label:
-            self._set_status(
-                f"{self._job_label} in progress...",
-                hold_seconds=0.8,
-            )
+            if not self._status_locked():
+                self._set_status(
+                    f"{self._job_label} in progress...",
+                    hold_seconds=0.8,
+                )
             return False
 
         self._job_label = str(label).strip() or "Working"
         label_text = self._job_label
         timeout_value = float(timeout_s) if timeout_s is not None else float(self._job_timeout_s)
-        self._set_status(f"{self._job_label}...", hold_seconds=0.4)
+        if not self._status_locked():
+            self._set_status(f"{self._job_label}...", hold_seconds=0.4)
 
         def _runner() -> None:
             done = threading.Event()

@@ -236,6 +236,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_feature_store_file_arg(rgb_set)
     _add_target_args(rgb_set)
 
+    rgb_menu = rgb_sub.add_parser(
+        "menu",
+        help="Open TUI RGB editor directly",
+    )
+    _add_target_args(rgb_menu)
+    rgb_menu.add_argument(
+        "--all-models",
+        action="store_true",
+        help="Show all detected models in device list (ignore --model filter)",
+    )
+    rgb_menu.add_argument(
+        "--all-transports",
+        action="store_true",
+        help="Show all transport endpoints (do not collapse rawhid USB/dongle/Bluetooth variants)",
+    )
+
     button_mapping_parser = subparsers.add_parser(
         "button-mapping",
         help="Button mapping (hardware when supported, local fallback otherwise)",
@@ -270,6 +286,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     button_actions = button_mapping_sub.add_parser("actions", help="List suggested buttons/actions for model")
     _add_target_args(button_actions)
+
+    button_menu = button_mapping_sub.add_parser(
+        "menu",
+        help="Open TUI button-mapping editor directly",
+    )
+    _add_target_args(button_menu)
+    button_menu.add_argument(
+        "--all-models",
+        action="store_true",
+        help="Show all detected models in device list (ignore --model filter)",
+    )
+    button_menu.add_argument(
+        "--all-transports",
+        action="store_true",
+        help="Show all transport endpoints (do not collapse rawhid USB/dongle/Bluetooth variants)",
+    )
 
     ble_parser = subparsers.add_parser("ble", help="BLE probing tools for reverse engineering")
     ble_sub = ble_parser.add_subparsers(dest="ble_command", required=True)

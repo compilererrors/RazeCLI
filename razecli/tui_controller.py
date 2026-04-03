@@ -36,6 +36,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         model_filter: Optional[str] = None,
         preselected_device_id: Optional[str] = None,
         collapse_transports: bool = True,
+        startup_editor: Optional[str] = None,
     ) -> None:
         self.service = service
         self.model_filter = model_filter
@@ -57,6 +58,8 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         self._state_cache: dict[str, DeviceState] = {}
         self._state_refreshed_at: dict[str, float] = {}
         self._battery_refreshed_at: dict[str, float] = {}
+        self._rgb_cache: dict[str, dict[str, Any]] = {}
+        self._button_mapping_cache: dict[str, dict[str, Any]] = {}
         self._refresh_interval_s = self._env_float(
             "RAZECLI_TUI_REFRESH_INTERVAL",
             default=1.5,
@@ -87,6 +90,8 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         self._job_label: Optional[str] = None
         self._job_results: "queue.Queue[tuple[bool, Any, Optional[Callable[[Any], None]], Optional[Callable[[Exception], None]]]]" = queue.Queue()
         self._bt_unavailable_fields: dict[str, tuple[str, ...]] = {}
+        self._startup_editor = startup_editor if startup_editor in {"rgb", "button-mapping"} else None
+        self._startup_editor_pending = bool(self._startup_editor)
 
     def _init_theme(self) -> None:
         self._palette = {}
@@ -120,6 +125,12 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             "selected": selected or curses.A_REVERSE,
             "muted": muted or curses.A_DIM,
             "footer": curses.A_BOLD | (footer or 0),
+            "modal_backdrop": curses.A_DIM,
+            "modal_border": curses.A_BOLD | accent,
+            "modal_title": curses.A_BOLD | accent,
+            "modal_text": 0,
+            "modal_footer": curses.A_DIM | (footer or 0),
+            "modal_shadow": curses.A_DIM,
             "status": 0,
             "status_ok": curses.A_BOLD | success,
             "status_warn": curses.A_BOLD | warn,
@@ -287,6 +298,8 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             "Device actions\n"
             "  + / -: Adjust DPI step\n"
             "  d: Set custom DPI\n"
+            "  g: RGB editor\n"
+            "  b: Button-mapping table/editor (manual + capture assist)\n"
             "  s: Next DPI profile\n"
             "  n: DPI profile editor\n"
             "  p: Next poll-rate\n"
@@ -359,6 +372,18 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
 
             while True:
                 self._drain_background_job_results()
+                if (
+                    self._startup_editor_pending
+                    and not self._has_pending_activity()
+                ):
+                    self._startup_editor_pending = False
+                    if self.devices and self._selected() is not None:
+                        if self._startup_editor == "rgb":
+                            self._edit_rgb(stdscr)
+                        elif self._startup_editor == "button-mapping":
+                            self._edit_button_mapping(stdscr)
+                        self._startup_editor = None
+                        continue
                 self._render(stdscr)
                 key = stdscr.getch()
 
@@ -413,6 +438,12 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                 if key == ord("d"):
                     self._set_custom_dpi(stdscr)
                     continue
+                if key == ord("g"):
+                    self._edit_rgb(stdscr)
+                    continue
+                if key == ord("b"):
+                    self._edit_button_mapping(stdscr)
+                    continue
                 if key == ord("p"):
                     self._cycle_poll_rate()
                     continue
@@ -440,12 +471,14 @@ def run_tui(
     model_filter: Optional[str] = None,
     preselected_device_id: Optional[str] = None,
     collapse_transports: bool = True,
+    startup_editor: Optional[str] = None,
 ) -> int:
     controller = TuiController(
         service=service,
         model_filter=model_filter,
         preselected_device_id=preselected_device_id,
         collapse_transports=collapse_transports,
+        startup_editor=startup_editor,
     )
 
     try:

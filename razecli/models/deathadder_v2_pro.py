@@ -13,4 +13,7 @@ MODEL = ModelSpec(
     supported_poll_rates=(125, 500, 1000),
     ble_poll_rate_supported=False,
     ble_supported_poll_rates=(),
+    # BLE RGB mode-write for this model/host is partially mapped.
+    # Spectrum remains disabled until selector mapping is fully verified.
+    ble_supported_rgb_modes=("off", "static", "breathing"),
 )

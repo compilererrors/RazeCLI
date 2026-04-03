@@ -1,11 +1,13 @@
 import unittest
 import os
+from dataclasses import replace
 
 import razecli.backends.macos_ble_backend as macos_ble_backend_mod
 import razecli.ble_probe as ble_probe_mod
 from razecli.backends.macos_ble_backend import (
     KEY_RGB_FRAME_READ,
     KEY_RGB_FRAME_WRITE,
+    KEY_RGB_MODE_WRITE,
     KEY_BATTERY_RAW_READ,
     KEY_BATTERY_STATUS_READ,
     KEY_DPI_STAGES_READ,
@@ -77,6 +79,7 @@ class _FakeVendorCall:
         self.poll_code = 0x01
         self.rgb_brightness = 0x80
         self.rgb_color = (0x00, 0xFF, 0x00)
+        self.rgb_mode_selector = 0x00
         self.button_payloads = {}
 
     def __call__(
@@ -144,6 +147,11 @@ class _FakeVendorCall:
             payload = bytes(value_payload or b"")
             if len(payload) >= 8:
                 self.rgb_color = (int(payload[5]), int(payload[6]), int(payload[7]))
+            return {"vendor_decode": {"payload_hex": ""}}
+        if key_bytes == KEY_RGB_MODE_WRITE:
+            payload = bytes(value_payload or b"")
+            if len(payload) >= 1:
+                self.rgb_mode_selector = int(payload[0])
             return {"vendor_decode": {"payload_hex": ""}}
         if len(key_bytes) == 4 and key_bytes[:3] == bytes.fromhex("080401"):
             slot = int(key_bytes[3])
@@ -527,6 +535,49 @@ class MacOSBleBackendTest(unittest.TestCase):
         current = self.backend.get_button_mapping(device)
         self.assertEqual(current["mapping"]["side_1"], "mouse:back")
         self.assertIn("left_click", current["mapping"])
+
+    def test_rgb_spectrum_mode_writes_mode_selector(self):
+        device = self.backend.detect()[0]
+        model = self.backend._model_registry.get("deathadder-v2-pro")
+        self.assertIsNotNone(model)
+        self.backend._model_registry._models["deathadder-v2-pro"] = replace(
+            model,
+            ble_supported_rgb_modes=("off", "static", "breathing", "spectrum"),
+        )
+        state = self.backend.set_rgb(device, mode="spectrum", brightness=60, color=None)
+        self.assertEqual(state["mode"], "spectrum")
+        self.assertEqual(self.fake_vendor.rgb_mode_selector, 0x08)
+
+        mode_calls = [row for row in self.fake_vendor.calls if row["key_hex"] == KEY_RGB_MODE_WRITE.hex()]
+        self.assertTrue(mode_calls)
+        self.assertEqual(mode_calls[-1]["value_payload"], bytes.fromhex("08000000"))
+
+    def test_rgb_breathing_mode_writes_mode_selector_and_color(self):
+        device = self.backend.detect()[0]
+        model = self.backend._model_registry.get("deathadder-v2-pro")
+        self.assertIsNotNone(model)
+        self.backend._model_registry._models["deathadder-v2-pro"] = replace(
+            model,
+            ble_supported_rgb_modes=("off", "static", "breathing", "spectrum"),
+        )
+        state = self.backend.set_rgb(device, mode="breathing", brightness=40, color="224466")
+        self.assertEqual(state["mode"], "breathing")
+        self.assertEqual(self.fake_vendor.rgb_mode_selector, 0x02)
+        self.assertEqual(self.fake_vendor.rgb_color, (0x22, 0x44, 0x66))
+
+    def test_rgb_spectrum_rejected_by_default_model_policy(self):
+        device = self.backend.detect()[0]
+        with self.assertRaises(CapabilityUnsupportedError):
+            self.backend.set_rgb(device, mode="spectrum", brightness=60, color=None)
+
+    def test_button_mapping_supports_scroll_and_keyboard_actions(self):
+        device = self.backend.detect()[0]
+        self.backend.set_button_mapping(device, button="side_2", action="mouse:scroll-down")
+        self.backend.set_button_mapping(device, button="side_1", action="keyboard:0x2c")
+
+        current = self.backend.get_button_mapping(device)
+        self.assertEqual(current["mapping"]["side_2"], "mouse:scroll-down")
+        self.assertEqual(current["mapping"]["side_1"], "keyboard:0x2c")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 from razecli.cli_common import emit, resolve_target_device
 from razecli.device_service import DeviceService
-from razecli.errors import CapabilityUnsupportedError, RazeCliError
+from razecli.errors import CapabilityUnsupportedError, DeviceSelectionError, RazeCliError
 from razecli.feature_scaffolds import (
     get_button_mapping_scaffold,
     list_button_mapping_actions,
@@ -25,6 +25,24 @@ def _merge_button_mapping_state(local_state: Dict[str, Any], hardware_state: Dic
 
 
 def handle_button_mapping(service: DeviceService, args: argparse.Namespace) -> int:
+    if args.button_mapping_command == "menu":
+        if args.json:
+            raise RazeCliError("--json is not supported in interactive TUI mode")
+
+        from razecli.tui import run_tui
+
+        model_filter = None if bool(getattr(args, "all_models", False)) else args.model
+        if model_filter and service.registry.get(model_filter) is None:
+            raise DeviceSelectionError(f"Unknown model: {model_filter}")
+
+        return run_tui(
+            service=service,
+            model_filter=model_filter,
+            preselected_device_id=args.device,
+            collapse_transports=not bool(getattr(args, "all_transports", False)),
+            startup_editor="button-mapping",
+        )
+
     device = resolve_target_device(service, args)
     backend = service.resolve_backend(device)
 

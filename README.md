@@ -62,25 +62,25 @@ Supported models:
   Next local priority: add retry/backoff and host-specific fallback paths.
 
 - **RGB**
-  Available now: experimental DA V2 Pro hardware path on `macos-ble` (`off/static` + brightness/color), with local fallback persistence.
-  Missing for production: robust multi-mode effect mapping, rawhid parity, and wider model validation.
+  Available now: experimental DA V2 Pro hardware path on `macos-ble` (`off/static/breathing/spectrum` + brightness/color), with local fallback persistence.
+  Missing for production: broader cross-model mode validation and rawhid parity.
   Next local priority: stabilize additional RGB modes and add `rawhid` parity.
 
 - **Button mapping**
-  Available now: experimental DA V2 Pro hardware path on `macos-ble` for basic actions (`mouse:*`, `dpi:cycle`, `disabled`), with local fallback persistence.
-  Missing for production: full action taxonomy, rawhid parity, and per-model slot validation.
+  Available now: experimental DA V2 Pro hardware path on `macos-ble` for mouse actions (`mouse:*` incl. scroll), `dpi:cycle`, keyboard actions, and turbo variants, with local fallback persistence.
+  Missing for production: full action taxonomy parity on more models and rawhid parity.
   Next local priority: broaden action coverage and add `rawhid` support.
 
 - **RGB/button UX**
-  Available now: CLI contract exists.
-  Missing for production: TUI editor flows and live apply feedback.
-  Next local priority: add TUI panels once DA V2 Pro write path is stable.
+  Available now: CLI + TUI editors (`g` for RGB with presets, `b` for button-mapping table/editor).
+  Missing for production: full physical-button capture reliability across macOS hosts and broader cross-model validation.
+  Next local priority: strengthen capture-assisted mapping and add more preset/mode templates.
 
 ## Next Local Priorities
 
 1. Add DA V2 Pro RGB hardware parity in `rawhid` (after current `macos-ble` path).
 2. Add DA V2 Pro button-mapping hardware parity in `rawhid` (after current `macos-ble` path).
-3. Add TUI pages for RGB/button editing after hardware calls are stable.
+3. Improve TUI RGB/button workflows (presets, validation hints, optional capture-assisted mapping).
 4. Extend model coverage only after DA V2 Pro paths are validated with repeatable tests.
 
 ## Architecture
@@ -286,6 +286,8 @@ RGB (hardware-first when backend supports it, local fallback otherwise):
 ```bash
 razecli rgb get
 razecli rgb set --mode static --brightness 55 --color 00ff88
+razecli rgb set --mode breathing --brightness 45 --color ff5500
+razecli rgb set --mode spectrum --brightness 60
 ```
 
 Button mapping (hardware-first when backend supports it, local fallback otherwise):
@@ -294,6 +296,9 @@ Button mapping (hardware-first when backend supports it, local fallback otherwis
 razecli button-mapping get
 razecli button-mapping actions
 razecli button-mapping set --button side_1 --action mouse:back
+razecli button-mapping set --button side_2 --action mouse:scroll-down
+razecli button-mapping set --button side_1 --action keyboard:0x2c
+razecli button-mapping set --button side_1 --action mouse-turbo:mouse:left:142
 razecli button-mapping reset
 ```
 
@@ -466,9 +471,21 @@ Recommended workflow when adding a new BT model:
 - `up/down` or `k/j`: select device
 - `+` / `-`: change DPI in steps of 100
 - `d`: enter custom DPI X/Y
+- `g`: open RGB editor dialog (manual edit + apply/save/delete presets)
+- `b`: open button-mapping table/editor dialog
 - `s`: switch to next DPI stage (on devices with `dpi-stages`)
 - `n`: set DPI stage count (1-5) on selected device
 - `p`: cycle poll-rate
+
+Inside the button-mapping dialog:
+- `up/down` or `k/j`: select button row
+- `Enter`: choose action for selected button
+- `c`: capture assist (global mouse-click hook, falls back to manual when unavailable)
+- `r`: reload mapping from backend
+- `q`/`Esc`: close dialog
+
+Capture assist uses optional `pynput` for global mouse events.  
+Install with `python -m pip install pynput` and grant macOS Accessibility/Input Monitoring permissions if prompted.
 
 ## Add a New Model
 

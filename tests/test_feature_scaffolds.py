@@ -4,9 +4,12 @@ from pathlib import Path
 
 from razecli.errors import RazeCliError
 from razecli.feature_scaffolds import (
+    delete_rgb_preset,
     get_button_mapping_scaffold,
+    get_rgb_presets,
     get_rgb_scaffold,
     reset_button_mapping_scaffold,
+    save_rgb_preset,
     set_button_mapping_scaffold,
     set_rgb_scaffold,
 )
@@ -55,6 +58,42 @@ class FeatureScaffoldsTest(unittest.TestCase):
                     "deathadder-v2-pro",
                     button="unknown_button",
                     action="mouse:left",
+                    path=store,
+                )
+
+    def test_rgb_presets_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = str(Path(tmp_dir) / "feature_store.json")
+            presets = get_rgb_presets("deathadder-v2-pro", path=store)
+            self.assertIn("spectrum-medium", presets)
+
+            _, updated = save_rgb_preset(
+                "deathadder-v2-pro",
+                name="my-night",
+                mode="breathing",
+                brightness=35,
+                color="#224466",
+                path=store,
+            )
+            self.assertIn("my-night", updated)
+            self.assertEqual(updated["my-night"]["mode"], "breathing")
+            self.assertEqual(updated["my-night"]["brightness"], 35)
+            self.assertEqual(updated["my-night"]["color"], "224466")
+
+            _, removed = delete_rgb_preset(
+                "deathadder-v2-pro",
+                name="my-night",
+                path=store,
+            )
+            self.assertNotIn("my-night", removed)
+
+    def test_delete_builtin_preset_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = str(Path(tmp_dir) / "feature_store.json")
+            with self.assertRaises(RazeCliError):
+                delete_rgb_preset(
+                    "deathadder-v2-pro",
+                    name="off",
                     path=store,
                 )
 

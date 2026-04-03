@@ -20,6 +20,9 @@ class ModelSpec:
     # Keep disabled unless verified on real hardware/firmware.
     ble_poll_rate_supported: bool = False
     ble_supported_poll_rates: Sequence[int] = ()
+    # Bluetooth (macos-ble) RGB mode policy.
+    # Keep conservative by default; expand per model only after validation.
+    ble_supported_rgb_modes: Sequence[str] = ("off", "static")
 
     def matches(self, vendor_id: int, product_id: int) -> bool:
         return (vendor_id, product_id) in self.usb_ids

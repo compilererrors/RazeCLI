@@ -9,9 +9,35 @@ from razecli.cli_common import (
     mirror_dpi_to_transport_peers,
     persist_autosync_from_device,
     resolve_target_device,
+    validate_dpi_values,
     validate_dpi_args,
 )
 from razecli.device_service import DeviceService
+
+
+def _apply_dpi_set(
+    service: DeviceService,
+    args: argparse.Namespace,
+    *,
+    device,
+    backend,
+    dpi_x: int,
+    dpi_y: int,
+) -> int:
+    backend.set_dpi(device, dpi_x, dpi_y)
+    mirror_dpi_to_transport_peers(service, device, dpi_x, dpi_y)
+    persist_autosync_from_device(device, backend)
+    emit(
+        {
+            "status": "ok",
+            "id": device.identifier,
+            "model": device.model_id,
+            "dpi_x": dpi_x,
+            "dpi_y": dpi_y,
+        },
+        as_json=args.json,
+    )
+    return 0
 
 
 def handle_dpi(service: DeviceService, args: argparse.Namespace) -> int:
@@ -32,18 +58,26 @@ def handle_dpi(service: DeviceService, args: argparse.Namespace) -> int:
         return 0
 
     dpi_x, dpi_y = validate_dpi_args(args, service, device)
-    backend.set_dpi(device, dpi_x, dpi_y)
-    mirror_dpi_to_transport_peers(service, device, dpi_x, dpi_y)
-    persist_autosync_from_device(device, backend)
-    emit(
-        {
-            "status": "ok",
-            "id": device.identifier,
-            "model": device.model_id,
-            "dpi_x": dpi_x,
-            "dpi_y": dpi_y,
-        },
-        as_json=args.json,
+    return _apply_dpi_set(
+        service,
+        args,
+        device=device,
+        backend=backend,
+        dpi_x=dpi_x,
+        dpi_y=dpi_y,
     )
-    return 0
 
+
+def handle_dpi_quick_set(service: DeviceService, args: argparse.Namespace) -> int:
+    device = resolve_target_device(service, args)
+    backend = service.resolve_backend(device)
+    dpi = int(args.dpi)
+    dpi_x, dpi_y = validate_dpi_values(dpi, dpi, service, device)
+    return _apply_dpi_set(
+        service,
+        args,
+        device=device,
+        backend=backend,
+        dpi_x=dpi_x,
+        dpi_y=dpi_y,
+    )

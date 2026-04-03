@@ -35,7 +35,8 @@ echo "  ${DOWNLOAD_URL}"
 curl -fsSL -o "${tmp_dir}/${ASSET_NAME}" "${DOWNLOAD_URL}"
 
 tar -xzf "${tmp_dir}/${ASSET_NAME}" -C "${tmp_dir}"
-source_bin="${tmp_dir}/razecli-onedir/razecli-onedir"
+source_bundle_dir="${tmp_dir}/razecli-onedir"
+source_bin="${source_bundle_dir}/razecli-onedir"
 if [[ ! -x "${source_bin}" ]]; then
   echo "Error: could not find executable in release archive: ${source_bin}" >&2
   exit 1
@@ -90,11 +91,26 @@ fi
 
 target_dir="$(dirname "${target_path}")"
 mkdir -p "${target_dir}"
-install -m 755 "${source_bin}" "${target_path}"
+
+# PyInstaller onedir binaries require the sibling "_internal" directory.
+# Install the full bundle next to the launcher path and generate a tiny wrapper.
+bundle_dir="${target_dir}/.razecli-onedir"
+rm -rf "${bundle_dir}"
+mkdir -p "${bundle_dir}"
+cp -R "${source_bundle_dir}/." "${bundle_dir}/"
+
+cat > "${target_path}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "${bundle_dir}/razecli-onedir" "\$@"
+EOF
+chmod 755 "${target_path}"
 
 echo ""
 echo "Installed:"
 echo "  ${target_path}"
+echo "Bundle:"
+echo "  ${bundle_dir}"
 echo ""
 echo "Test:"
 echo "  ${target_path} --help"

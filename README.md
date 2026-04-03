@@ -168,6 +168,7 @@ razecli --help
 The installer downloads the latest packaged `onedir` binary and prompts:
 - `1` to install at `~/bin/razecli`
 - `2` to enter a custom install path
+It installs a `razecli` launcher plus the required bundled runtime directory.
 
 Direct install link (run from anywhere):
 

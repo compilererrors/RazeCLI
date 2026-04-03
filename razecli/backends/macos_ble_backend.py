@@ -897,12 +897,46 @@ class MacOSBleBackend(Backend):
 
     def _resolve_target(self, device: DetectedDevice) -> Tuple[Optional[str], str]:
         handle = self._device_handle(device)
+        resolved_uuid = str(handle.get("resolved_bt_address") or "").strip()
+        if resolved_uuid and "-" in resolved_uuid:
+            return resolved_uuid, device.name or DEFAULT_NAME_QUERY
+
         bt_address = str(handle.get("bt_address") or "").strip()
         if self._is_mac_address(bt_address):
+            alias_resolved = self._alias_resolved_uuid(bt_address)
+            if alias_resolved:
+                handle["resolved_bt_address"] = alias_resolved
+                return alias_resolved, device.name or DEFAULT_NAME_QUERY
             return bt_address, device.name or DEFAULT_NAME_QUERY
         if self._is_mac_address(device.serial):
+            alias_resolved = self._alias_resolved_uuid(str(device.serial))
+            if alias_resolved:
+                handle["resolved_bt_address"] = alias_resolved
+                return alias_resolved, device.name or DEFAULT_NAME_QUERY
             return str(device.serial), device.name or DEFAULT_NAME_QUERY
         return None, device.name or device.model_name or DEFAULT_NAME_QUERY
+
+    @staticmethod
+    def _alias_resolved_uuid(mac_address: str) -> Optional[str]:
+        try:
+            from razecli.ble.alias_store import _load_alias_cache
+            from razecli.ble.common import _normalize_address
+        except Exception:
+            return None
+
+        key = _normalize_address(mac_address)
+        if not key:
+            return None
+        aliases = _load_alias_cache()
+        if not isinstance(aliases, dict):
+            return None
+        row = aliases.get(key)
+        if not isinstance(row, dict):
+            return None
+        resolved = str(row.get("resolved_address") or "").strip()
+        if resolved and "-" in resolved:
+            return resolved
+        return None
 
     @staticmethod
     def _vendor_path_from_handle(handle: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -949,6 +983,16 @@ class MacOSBleBackend(Backend):
             "hittades inte" in text and "gatt" in text
         )
 
+    @staticmethod
+    def _retryable_transport_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            "timeout" in text
+            or "timed out" in text
+            or ("device with address" in text and "was not found" in text)
+            or "a candidate was found but connection failed" in text
+        )
+
     def _vendor_call(
         self,
         *,
@@ -970,7 +1014,7 @@ class MacOSBleBackend(Backend):
         handle = self._device_handle(device)
         pinned_path = self._vendor_path_from_handle(handle)
 
-        def _tx(path: Optional[Dict[str, object]]) -> Dict[str, object]:
+        def _tx(path: Optional[Dict[str, object]], *, timeout_override: Optional[float] = None) -> Dict[str, object]:
             kwargs: Dict[str, object] = {}
             if path:
                 kwargs = {
@@ -978,10 +1022,11 @@ class MacOSBleBackend(Backend):
                     "write_char_uuid": str(path.get("write_char_uuid") or DEFAULT_RAZER_BT_WRITE_CHAR_UUID),
                     "read_char_uuids": list(path.get("read_char_uuids") or DEFAULT_RAZER_BT_READ_CHAR_UUIDS),
                 }
+            effective_timeout = float(timeout if timeout_override is None else timeout_override)
             return ble_vendor_transceive(
                 address=address,
                 name_query=name_query,
-                timeout=timeout,
+                timeout=effective_timeout,
                 key=key,
                 value_payload=value_payload,
                 response_timeout=response_timeout,
@@ -990,11 +1035,32 @@ class MacOSBleBackend(Backend):
                 **kwargs,
             )
 
+        def _remember_runtime_resolution(payload: Dict[str, object]) -> None:
+            resolved = str(payload.get("address") or "").strip()
+            if resolved and "-" in resolved:
+                handle["resolved_bt_address"] = resolved
+
         try:
-            return _tx(pinned_path)
+            payload = _tx(pinned_path)
+            _remember_runtime_resolution(payload)
+            return payload
         except Exception as first_exc:
-            if pinned_path is None and not self._missing_vendor_path_error(first_exc):
-                raise
+            retry_exc: Optional[Exception] = None
+            if self._retryable_transport_error(first_exc):
+                # On unstable macOS BLE sessions, the first connect can fail even though
+                # a second attempt succeeds. Retry once with a larger timeout budget.
+                try:
+                    time.sleep(0.12)
+                    retry_timeout = min(45.0, max(timeout * 1.5, 18.0))
+                    payload = _tx(pinned_path, timeout_override=retry_timeout)
+                    _remember_runtime_resolution(payload)
+                    return payload
+                except Exception as exc:
+                    retry_exc = exc
+
+            root_exc: Exception = retry_exc or first_exc
+            if pinned_path is None and not self._missing_vendor_path_error(root_exc):
+                raise root_exc
 
             try:
                 discovered = discover_vendor_gatt_path(
@@ -1003,10 +1069,12 @@ class MacOSBleBackend(Backend):
                     timeout=min(timeout, 10.0),
                 )
             except Exception:
-                raise first_exc
+                raise root_exc
 
             self._store_vendor_path(handle, discovered)
-            return _tx(discovered)
+            payload = _tx(discovered)
+            _remember_runtime_resolution(payload)
+            return payload
 
     @staticmethod
     def _decode_payload_bytes(result: Dict[str, object], *, key: bytes) -> bytes:

@@ -3,6 +3,11 @@ name: Manual Release
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: Existing tag to release (optional, for example v0.0.4). If set, no new tag is created.
+        required: false
+        default: ""
+        type: string
       bump:
         description: Version bump type
         required: true
@@ -33,6 +38,7 @@ jobs:
     outputs:
       latest: ${{ steps.version.outputs.latest }}
       next: ${{ steps.version.outputs.next }}
+      mode: ${{ steps.version.outputs.mode }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -45,6 +51,24 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --tags --force
+
+          input_tag="${{ inputs.tag }}"
+          if [[ -n "${input_tag}" ]]; then
+            if [[ ! "${input_tag}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "Input tag '${input_tag}' is not semver (expected vX.Y.Z)." >&2
+              exit 1
+            fi
+            if ! git rev-parse -q --verify "refs/tags/${input_tag}" >/dev/null; then
+              echo "Input tag '${input_tag}' does not exist in repository tags." >&2
+              echo "Create and push it first from your local machine, then rerun workflow with tag='${input_tag}'." >&2
+              exit 1
+            fi
+            echo "latest=${input_tag}" >> "$GITHUB_OUTPUT"
+            echo "next=${input_tag}" >> "$GITHUB_OUTPUT"
+            echo "mode=existing" >> "$GITHUB_OUTPUT"
+            echo "Using existing tag: ${input_tag}"
+            exit 0
+          fi
 
           latest="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
           if [[ -z "${latest}" ]]; then
@@ -87,6 +111,7 @@ jobs:
 
           echo "latest=${latest}" >> "$GITHUB_OUTPUT"
           echo "next=${next}" >> "$GITHUB_OUTPUT"
+          echo "mode=new" >> "$GITHUB_OUTPUT"
           echo "Computed next tag: ${next}"
 
   build-macos:
@@ -196,7 +221,7 @@ jobs:
           cp dist/x86_64/* dist/
           ls -la dist
 
-      - name: Generate Homebrew formula artifact
+      - name: Generate Homebrew formula file (optional tap usage)
         shell: bash
         run: |
           set -euo pipefail
@@ -213,6 +238,7 @@ jobs:
           cat dist/razecli.rb
 
       - name: Create and push tag
+        if: ${{ needs.derive-version.outputs.mode == 'new' }}
         shell: bash
         env:
           PUSH_TOKEN: ${{ secrets.RELEASE_PAT != '' && secrets.RELEASE_PAT || github.token }}

@@ -156,3 +156,12 @@ if grep -qi "BLE probe requires bleak" <<<"${ble_check_out}"; then
   echo "Warning: installed release binary is missing BLE runtime dependencies."
   echo "BLE features may fail on this release. Rebuild locally or install a newer release."
 fi
+
+set +e
+corebluetooth_check_out="$("${target_path}" --json ble alias resolve --address 00:11:22:33:44:55 --timeout 0.3 2>&1)"
+set -e
+if grep -Eqi "No module named '?(CoreBluetooth|Foundation|objc|libdispatch|bleak\\.backends\\.corebluetooth)" <<<"${corebluetooth_check_out}"; then
+  echo ""
+  echo "Warning: installed release binary is missing macOS BLE CoreBluetooth runtime modules."
+  echo "BLE connectivity can fail even if scan works. Rebuild locally or install a newer release."
+fi

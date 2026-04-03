@@ -151,6 +151,32 @@ jobs:
       - name: Build macOS onedir bundle (fast startup)
         run: ./scripts/build_macos_onedir.sh
 
+      - name: Smoke-check BLE module in packaged binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          check_ble_bundle() {
+            local bin="$1"
+            local out
+            local code
+            set +e
+            out="$("${bin}" --json ble scan --timeout 0.2 2>&1)"
+            code=$?
+            set -e
+
+            if grep -qi "BLE probe requires bleak" <<<"${out}"; then
+              echo "${out}"
+              echo "Packaged binary is missing bleak dependency: ${bin}" >&2
+              exit 1
+            fi
+
+            echo "BLE import check passed for ${bin} (exit code ${code})."
+          }
+
+          check_ble_bundle ./dist/razecli
+          check_ble_bundle ./dist/razecli-onedir/razecli-onedir
+
       - name: Rename and package artifacts
         shell: bash
         run: |

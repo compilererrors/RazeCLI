@@ -105,7 +105,7 @@ class TuiActionsMixin:
             return text
         if width <= 1:
             return text[:width]
-        return text[: width - 1] + "…"
+        return text[: width - 1] + "."
 
     @staticmethod
     def _estimate_modal_text_width(stdscr) -> int:

@@ -32,6 +32,9 @@ concurrency:
   group: manual-release
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   derive-version:
     runs-on: ubuntu-latest
@@ -122,7 +125,7 @@ jobs:
         include:
           - runner: macos-latest
             arch: arm64
-          - runner: macos-13
+          - runner: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     permissions:

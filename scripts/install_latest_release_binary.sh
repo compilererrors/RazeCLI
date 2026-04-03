@@ -147,3 +147,12 @@ if [[ ":${PATH}:" != *":${target_dir}:"* ]]; then
   echo "Run with full path, or add this to your shell profile:"
   echo "  export PATH=\"${target_dir}:\$PATH\""
 fi
+
+set +e
+ble_check_out="$("${target_path}" --json ble scan --timeout 0.2 2>&1)"
+set -e
+if grep -qi "BLE probe requires bleak" <<<"${ble_check_out}"; then
+  echo ""
+  echo "Warning: installed release binary is missing BLE runtime dependencies."
+  echo "BLE features may fail on this release. Rebuild locally or install a newer release."
+fi

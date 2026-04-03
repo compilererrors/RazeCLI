@@ -26,6 +26,7 @@ PYTHONPYCACHEPREFIX=/tmp/razecli-pyc "$PYTHON" -m PyInstaller \
   --onefile \
   --name razecli \
   --collect-all hid \
+  --collect-all bleak \
   --collect-submodules razecli.models \
   --collect-submodules razecli.backends \
   --collect-submodules razecli.ble \

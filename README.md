@@ -8,6 +8,8 @@ RGB and button mapping now run hardware-first on supported backends (currently e
 
 ![RazeCLI TUI screenshot](assets/tuiScreenShot.png)
 ![RazeCLI CLI screenshot](assets/cliScreenShot.png)
+![RazeCLI RGB menu in TUI](assets/rgbEditor.png)
+![RazeCLI Button-mapping menu in TUI](assets/setButtonMapping.png)
 
 Supported models:
 - `deathadder-v2-pro` (`1532:007C`, `1532:007D`, `1532:008E`)

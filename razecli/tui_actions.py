@@ -1461,204 +1461,257 @@ class TuiActionsMixin:
         current = dict(current_raw) if isinstance(current_raw, dict) else get_rgb_scaffold(model_id=device.model_id)
         presets = dict(presets_raw) if isinstance(presets_raw, dict) else get_rgb_presets(model_id=device.model_id)
 
-        current_mode = str(current.get("mode") or "off").strip().lower()
-        current_brightness = max(0, min(100, int(current.get("brightness", 60))))
-        current_color = str(current.get("color") or "00ff00").strip().lower()
-        modes_raw = current.get("modes_supported")
-        supported_modes = {
-            str(item).strip().lower()
-            for item in (modes_raw or [])
-            if str(item).strip()
-        }
+        def _sync_from_state(state: Dict[str, Any]) -> Tuple[str, int, str, set[str], Sequence[Any]]:
+            mode = str(state.get("mode") or "off").strip().lower()
+            brightness = max(0, min(100, int(state.get("brightness", 60))))
+            color = str(state.get("color") or "00ff00").strip().lower()
+            modes_supported_raw = state.get("modes_supported")
+            supported = {
+                str(item).strip().lower()
+                for item in (modes_supported_raw or [])
+                if str(item).strip()
+            }
+            return mode, brightness, color, supported, modes_supported_raw
 
-        action_index = self._select_menu(
-            stdscr,
-            title="RGB Editor",
-            description="Choose RGB action",
-            options=[
-                "Apply preset",
-                "Manual edit",
-                "Save current as preset",
-                "Delete preset",
-            ],
-            default_index=0,
-        )
-        if action_index is None:
-            return
+        current_mode, current_brightness, current_color, supported_modes, modes_raw = _sync_from_state(current)
+        action_default = 0
+        while True:
+            action_index = self._select_menu(
+                stdscr,
+                title="RGB Editor",
+                description="Choose RGB action",
+                options=[
+                    "Apply preset",
+                    "Manual edit",
+                    "Save current as preset",
+                    "Delete preset",
+                ],
+                default_index=action_default,
+                footer="Up/Down select | Enter confirm | Esc close editor",
+            )
+            if action_index is None:
+                return
+            action_default = int(action_index)
 
-        if action_index == 0:
+            if action_index == 0:
+                while True:
+                    preset_names = [
+                        name
+                        for name in presets.keys()
+                        if not supported_modes or str(presets[name].get("mode", "")).strip().lower() in supported_modes
+                    ]
+                    if not preset_names:
+                        self._set_status("No RGB presets available for current BLE mode support", hold_seconds=6.0)
+                        break
+                    preset_labels = [
+                        f"{name}  ({presets[name]['mode']} {presets[name]['brightness']}% #{presets[name]['color']})"
+                        for name in preset_names
+                    ]
+                    selected_preset_index = self._select_menu(
+                        stdscr,
+                        title="RGB Presets",
+                        description="Select preset to apply",
+                        options=preset_labels,
+                        default_index=0,
+                        footer="Up/Down select | Enter apply | Esc back",
+                    )
+                    if selected_preset_index is None:
+                        break
+                    preset_name = preset_names[selected_preset_index]
+                    preset = presets[preset_name]
+                    try:
+                        rgb_state = self._run_with_modal(
+                            stdscr,
+                            title="RGB Editor",
+                            description=f"Applying preset '{preset_name}'",
+                            footer="Writing RGB values",
+                            work=lambda: self._apply_rgb_state(
+                                device,
+                                mode=str(preset["mode"]),
+                                brightness=int(preset["brightness"]),
+                                color=str(preset["color"]),
+                            ),
+                        )
+                        if isinstance(rgb_state, dict):
+                            current = dict(rgb_state)
+                            current_mode, current_brightness, current_color, supported_modes, modes_raw = _sync_from_state(current)
+                        apply_state = str(rgb_state.get("hardware_apply") or "unknown")
+                        self.status = (
+                            f"RGB preset '{preset_name}' applied: "
+                            f"{rgb_state.get('mode')} {rgb_state.get('brightness')}% "
+                            f"#{rgb_state.get('color')} ({apply_state})"
+                        )
+                    except Exception as exc:
+                        self._set_status(f"Could not apply RGB preset: {exc}", hold_seconds=8.0)
+                    break
+                continue
+
+            if action_index == 1:
+                modes = [str(item).strip().lower() for item in (modes_raw or []) if str(item).strip()]
+                if not modes:
+                    modes = ["off", "static", "breathing", "spectrum"]
+                mode_default = modes.index(current_mode) if current_mode in modes else 0
+                mode: Optional[str] = None
+                brightness: Optional[int] = None
+                color: Optional[str] = None
+                step = "mode"
+                while True:
+                    if step == "mode":
+                        mode_index = self._select_menu(
+                            stdscr,
+                            title="RGB Mode",
+                            description="Choose RGB mode",
+                            options=modes,
+                            default_index=mode_default,
+                            footer="Up/Down select | Enter confirm | Esc back",
+                        )
+                        if mode_index is None:
+                            break
+                        mode_default = int(mode_index)
+                        mode = modes[mode_index]
+                        if mode == "off":
+                            brightness = 0
+                            color = current_color
+                            step = "apply"
+                        else:
+                            step = "brightness"
+                        continue
+
+                    if step == "brightness":
+                        brightness = self._prompt_int(
+                            stdscr,
+                            "RGB brightness (0-100)",
+                            current_brightness,
+                            help_text="Set brightness percent for the selected RGB mode.",
+                        )
+                        if brightness is None:
+                            step = "mode"
+                            continue
+                        if brightness < 0 or brightness > 100:
+                            self._show_action_dialog(
+                                stdscr,
+                                title="Invalid brightness",
+                                message="Brightness must be between 0 and 100.",
+                            )
+                            continue
+                        if mode in {"static", "breathing"}:
+                            step = "color"
+                        else:
+                            color = current_color
+                            step = "apply"
+                        continue
+
+                    if step == "color":
+                        typed_color = self._prompt_text(
+                            stdscr,
+                            "RGB color (hex)",
+                            current_color,
+                            help_text="Example: 00ff88 or #00ff88",
+                            max_len=7,
+                        )
+                        if typed_color is None:
+                            step = "brightness"
+                            continue
+                        try:
+                            color = self._normalize_hex_color(typed_color)
+                        except ValueError as exc:
+                            self._show_action_dialog(
+                                stdscr,
+                                title="Invalid color",
+                                message=str(exc),
+                            )
+                            continue
+                        step = "apply"
+                        continue
+
+                    if mode is None:
+                        break
+                    try:
+                        rgb_state = self._run_with_modal(
+                            stdscr,
+                            title="RGB Editor",
+                            description=f"Applying mode '{mode}'",
+                            footer="Writing RGB values",
+                            work=lambda: self._apply_rgb_state(
+                                device,
+                                mode=mode,
+                                brightness=brightness,
+                                color=color,
+                            ),
+                        )
+                        if isinstance(rgb_state, dict):
+                            current = dict(rgb_state)
+                            current_mode, current_brightness, current_color, supported_modes, modes_raw = _sync_from_state(current)
+                        apply_state = str(rgb_state.get("hardware_apply") or "unknown")
+                        self.status = (
+                            f"RGB updated: {rgb_state.get('mode')} {rgb_state.get('brightness')}% "
+                            f"#{rgb_state.get('color')} ({apply_state})"
+                        )
+                    except Exception as exc:
+                        self._set_status(f"Could not set RGB: {exc}", hold_seconds=8.0)
+                    break
+                continue
+
+            if action_index == 2:
+                preset_name = self._prompt_text(
+                    stdscr,
+                    "Preset name",
+                    "my-preset",
+                    help_text="Save current RGB state under this name.",
+                    max_len=32,
+                )
+                if preset_name is None:
+                    continue
+                normalized_name = str(preset_name).strip()
+                if not normalized_name:
+                    self._show_action_dialog(
+                        stdscr,
+                        title="Invalid preset name",
+                        message="Preset name cannot be empty.",
+                    )
+                    continue
+                try:
+                    _store_path, updated_presets = save_rgb_preset(
+                        model_id=device.model_id,
+                        name=normalized_name,
+                        mode=current_mode,
+                        brightness=int(current_brightness),
+                        color=current_color,
+                    )
+                    presets = dict(updated_presets)
+                    self.status = f"Saved RGB preset '{normalized_name}'"
+                except Exception as exc:
+                    self._set_status(f"Could not save preset: {exc}", hold_seconds=8.0)
+                continue
+
             preset_names = [
                 name
                 for name in presets.keys()
-                if not supported_modes or str(presets[name].get("mode", "")).strip().lower() in supported_modes
+                if name not in {"off", "static-green", "breathing-warm", "spectrum-medium"}
             ]
             if not preset_names:
-                self._set_status("No RGB presets available for current BLE mode support", hold_seconds=6.0)
-                return
-            preset_labels = [
-                f"{name}  ({presets[name]['mode']} {presets[name]['brightness']}% #{presets[name]['color']})"
-                for name in preset_names
-            ]
-            selected_preset_index = self._select_menu(
+                self._set_status("No custom RGB presets to delete", hold_seconds=6.0)
+                continue
+            remove_index = self._select_menu(
                 stdscr,
-                title="RGB Presets",
-                description="Select preset to apply",
-                options=preset_labels,
+                title="Delete Preset",
+                description="Select preset to delete",
+                options=preset_names,
                 default_index=0,
+                footer="Up/Down select | Enter delete | Esc back",
             )
-            if selected_preset_index is None:
-                return
-            preset_name = preset_names[selected_preset_index]
-            preset = presets[preset_name]
+            if remove_index is None:
+                continue
+            preset_name = preset_names[remove_index]
             try:
-                rgb_state = self._run_with_modal(
-                    stdscr,
-                    title="RGB Editor",
-                    description=f"Applying preset '{preset_name}'",
-                    footer="Writing RGB values",
-                    work=lambda: self._apply_rgb_state(
-                        device,
-                        mode=str(preset["mode"]),
-                        brightness=int(preset["brightness"]),
-                        color=str(preset["color"]),
-                    ),
-                )
-                apply_state = str(rgb_state.get("hardware_apply") or "unknown")
-                self.status = (
-                    f"RGB preset '{preset_name}' applied: "
-                    f"{rgb_state.get('mode')} {rgb_state.get('brightness')}% "
-                    f"#{rgb_state.get('color')} ({apply_state})"
-                )
-            except Exception as exc:
-                self._set_status(f"Could not apply RGB preset: {exc}", hold_seconds=8.0)
-            return
-
-        if action_index == 1:
-            modes = [str(item).strip().lower() for item in (modes_raw or []) if str(item).strip()]
-            if not modes:
-                modes = ["off", "static", "breathing", "spectrum"]
-            mode_default = modes.index(current_mode) if current_mode in modes else 0
-            mode_index = self._select_menu(
-                stdscr,
-                title="RGB Mode",
-                description="Choose RGB mode",
-                options=modes,
-                default_index=mode_default,
-            )
-            if mode_index is None:
-                return
-            mode = modes[mode_index]
-
-            brightness: Optional[int]
-            if mode == "off":
-                brightness = 0
-            else:
-                brightness = self._prompt_int(
-                    stdscr,
-                    "RGB brightness (0-100)",
-                    current_brightness,
-                    help_text="Set brightness percent for the selected RGB mode.",
-                )
-                if brightness is None:
-                    return
-                if brightness < 0 or brightness > 100:
-                    self._show_action_dialog(
-                        stdscr,
-                        title="Invalid brightness",
-                        message="Brightness must be between 0 and 100.",
-                    )
-                    return
-
-            color: Optional[str] = None
-            if mode in {"static", "breathing"}:
-                typed_color = self._prompt_text(
-                    stdscr,
-                    "RGB color (hex)",
-                    current_color,
-                    help_text="Example: 00ff88 or #00ff88",
-                    max_len=7,
-                )
-                if typed_color is None:
-                    return
-                try:
-                    color = self._normalize_hex_color(typed_color)
-                except ValueError as exc:
-                    self._show_action_dialog(
-                        stdscr,
-                        title="Invalid color",
-                        message=str(exc),
-                    )
-                    return
-            else:
-                color = current_color
-
-            try:
-                rgb_state = self._run_with_modal(
-                    stdscr,
-                    title="RGB Editor",
-                    description=f"Applying mode '{mode}'",
-                    footer="Writing RGB values",
-                    work=lambda: self._apply_rgb_state(
-                        device,
-                        mode=mode,
-                        brightness=brightness,
-                        color=color,
-                    ),
-                )
-                apply_state = str(rgb_state.get("hardware_apply") or "unknown")
-                self.status = (
-                    f"RGB updated: {rgb_state.get('mode')} {rgb_state.get('brightness')}% "
-                    f"#{rgb_state.get('color')} ({apply_state})"
-                )
-            except Exception as exc:
-                self._set_status(f"Could not set RGB: {exc}", hold_seconds=8.0)
-            return
-
-        if action_index == 2:
-            preset_name = self._prompt_text(
-                stdscr,
-                "Preset name",
-                "my-preset",
-                help_text="Save current RGB state under this name.",
-                max_len=32,
-            )
-            if preset_name is None:
-                return
-            try:
-                _store_path, _presets = save_rgb_preset(
+                delete_rgb_preset(
                     model_id=device.model_id,
                     name=preset_name,
-                    mode=current_mode,
-                    brightness=int(current_brightness),
-                    color=current_color,
                 )
-                self.status = f"Saved RGB preset '{preset_name}'"
+                presets.pop(preset_name, None)
+                self.status = f"Deleted RGB preset '{preset_name}'"
             except Exception as exc:
-                self._set_status(f"Could not save preset: {exc}", hold_seconds=8.0)
-            return
-
-        preset_names = [name for name in presets.keys() if name not in {"off", "static-green", "breathing-warm", "spectrum-medium"}]
-        if not preset_names:
-            self._set_status("No custom RGB presets to delete", hold_seconds=6.0)
-            return
-        remove_index = self._select_menu(
-            stdscr,
-            title="Delete Preset",
-            description="Select preset to delete",
-            options=preset_names,
-            default_index=0,
-        )
-        if remove_index is None:
-            return
-        preset_name = preset_names[remove_index]
-        try:
-            delete_rgb_preset(
-                model_id=device.model_id,
-                name=preset_name,
-            )
-            self.status = f"Deleted RGB preset '{preset_name}'"
-        except Exception as exc:
-            self._set_status(f"Could not delete preset: {exc}", hold_seconds=8.0)
+                self._set_status(f"Could not delete preset: {exc}", hold_seconds=8.0)
 
     def _apply_button_mapping_state(
         self,
@@ -1807,54 +1860,64 @@ class TuiActionsMixin:
             current_action = str(mapping.get(selected_button) or "").strip().lower()
             action_options = list(actions) + ["custom..."]
             default_idx = action_options.index(current_action) if current_action in action_options else 0
-            action_idx = self._select_menu(
-                stdscr,
-                title=f"Action for {self._button_label(selected_button)}",
-                description="Choose action",
-                options=action_options,
-                default_index=default_idx,
-            )
-            if action_idx is None:
-                continue
-            action = action_options[action_idx]
-            if action == "custom...":
-                custom = self._prompt_text(
+            while True:
+                action_idx = self._select_menu(
                     stdscr,
-                    "Custom action",
-                    current_action or "keyboard:0x2c",
-                    help_text=(
-                        "Examples:\n"
-                        "- mouse:scroll-down\n"
-                        "- keyboard:0x2c\n"
-                        "- mouse-turbo:mouse:left:142\n"
-                        "- keyboard-turbo:0x2c:142"
-                    ),
+                    title=f"Action for {self._button_label(selected_button)}",
+                    description="Choose action",
+                    options=action_options,
+                    default_index=default_idx,
+                    footer="Up/Down select | Enter confirm | Esc back",
                 )
-                if custom is None:
-                    continue
-                action = str(custom).strip().lower()
-                if not action:
-                    continue
+                if action_idx is None:
+                    break
+                default_idx = int(action_idx)
+                action = action_options[action_idx]
+                if action == "custom...":
+                    custom = self._prompt_text(
+                        stdscr,
+                        "Custom action",
+                        current_action or "keyboard:0x2c",
+                        help_text=(
+                            "Examples:\n"
+                            "- mouse:scroll-down\n"
+                            "- keyboard:0x2c\n"
+                            "- mouse-turbo:mouse:left:142\n"
+                            "- keyboard-turbo:0x2c:142"
+                        ),
+                    )
+                    if custom is None:
+                        # One-step back: return to action selection.
+                        continue
+                    action = str(custom).strip().lower()
+                    if not action:
+                        self._show_action_dialog(
+                            stdscr,
+                            title="Invalid action",
+                            message="Action cannot be empty.",
+                        )
+                        continue
 
-            try:
-                state = self._run_with_modal(
-                    stdscr,
-                    title="Button Mapping",
-                    description=f"Applying {self._button_label(selected_button)} -> {action}",
-                    footer="Writing button map",
-                    work=lambda: self._apply_button_mapping_state(
-                        device,
-                        button=selected_button,
-                        action=action,
-                    ),
-                )
-                next_mapping = state.get("mapping")
-                if isinstance(next_mapping, dict):
-                    mapping = dict(next_mapping)
-                apply_state = str(state.get("hardware_apply") or "unknown")
-                self.status = f"Mapped {self._button_label(selected_button)} -> {action} ({apply_state})"
-            except Exception as exc:
-                self._set_status(f"Could not set button mapping: {exc}", hold_seconds=8.0)
+                try:
+                    state = self._run_with_modal(
+                        stdscr,
+                        title="Button Mapping",
+                        description=f"Applying {self._button_label(selected_button)} -> {action}",
+                        footer="Writing button map",
+                        work=lambda: self._apply_button_mapping_state(
+                            device,
+                            button=selected_button,
+                            action=action,
+                        ),
+                    )
+                    next_mapping = state.get("mapping")
+                    if isinstance(next_mapping, dict):
+                        mapping = dict(next_mapping)
+                    apply_state = str(state.get("hardware_apply") or "unknown")
+                    self.status = f"Mapped {self._button_label(selected_button)} -> {action} ({apply_state})"
+                except Exception as exc:
+                    self._set_status(f"Could not set button mapping: {exc}", hold_seconds=8.0)
+                break
 
     def _set_custom_dpi(self, stdscr) -> None:
         if self.state.dpi is None:

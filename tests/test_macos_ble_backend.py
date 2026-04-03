@@ -135,6 +135,8 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.backend._supported = True
         self.backend._rawhid = _FakeRawHid()
         self.backend._profiler = _FakeProfiler()
+        # Keep tests deterministic and offline; battery GATT path is tested via explicit stubs.
+        self.backend._read_standard_battery_level = lambda _device: None
         self.fake_vendor = _FakeVendorCall()
         self._orig_vendor_call = ble_probe_mod.ble_vendor_transceive
         self._orig_discover_vendor_path = ble_probe_mod.discover_vendor_gatt_path
@@ -250,6 +252,13 @@ class MacOSBleBackendTest(unittest.TestCase):
         battery = self.backend.get_battery(device)
         self.assertEqual(battery, 90)
         self.assertEqual(self.fake_vendor.calls[-1]["address"], "02:11:22:33:44:55")
+
+    def test_get_battery_prefers_standard_battery_service(self):
+        device = self.backend.detect()[0]
+        self.backend._read_standard_battery_level = lambda _device: 89
+        battery = self.backend.get_battery(device)
+        self.assertEqual(battery, 89)
+        self.assertEqual(self.fake_vendor.calls, [])
 
     def test_get_battery_ignores_read_row_noise_for_raw_key(self):
         device = self.backend.detect()[0]

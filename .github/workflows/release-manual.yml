@@ -174,8 +174,28 @@ jobs:
             echo "BLE import check passed for ${bin} (exit code ${code})."
           }
 
+          check_corebluetooth_bundle() {
+            local bin="$1"
+            local out
+            local code
+            set +e
+            out="$("${bin}" --json ble alias resolve --address 00:11:22:33:44:55 --timeout 0.3 2>&1)"
+            code=$?
+            set -e
+
+            if grep -Eqi "No module named '?(CoreBluetooth|Foundation|objc|libdispatch|bleak\\.backends\\.corebluetooth)" <<<"${out}"; then
+              echo "${out}"
+              echo "Packaged binary is missing macOS BLE CoreBluetooth runtime modules: ${bin}" >&2
+              exit 1
+            fi
+
+            echo "CoreBluetooth import check passed for ${bin} (exit code ${code})."
+          }
+
           check_ble_bundle ./dist/razecli
           check_ble_bundle ./dist/razecli-onedir/razecli-onedir
+          check_corebluetooth_bundle ./dist/razecli
+          check_corebluetooth_bundle ./dist/razecli-onedir/razecli-onedir
 
       - name: Rename and package artifacts
         shell: bash

@@ -983,16 +983,6 @@ class MacOSBleBackend(Backend):
             "hittades inte" in text and "gatt" in text
         )
 
-    @staticmethod
-    def _retryable_transport_error(exc: Exception) -> bool:
-        text = str(exc).lower()
-        return (
-            "timeout" in text
-            or "timed out" in text
-            or ("device with address" in text and "was not found" in text)
-            or "a candidate was found but connection failed" in text
-        )
-
     def _vendor_call(
         self,
         *,
@@ -1014,7 +1004,7 @@ class MacOSBleBackend(Backend):
         handle = self._device_handle(device)
         pinned_path = self._vendor_path_from_handle(handle)
 
-        def _tx(path: Optional[Dict[str, object]], *, timeout_override: Optional[float] = None) -> Dict[str, object]:
+        def _tx(path: Optional[Dict[str, object]]) -> Dict[str, object]:
             kwargs: Dict[str, object] = {}
             if path:
                 kwargs = {
@@ -1022,11 +1012,10 @@ class MacOSBleBackend(Backend):
                     "write_char_uuid": str(path.get("write_char_uuid") or DEFAULT_RAZER_BT_WRITE_CHAR_UUID),
                     "read_char_uuids": list(path.get("read_char_uuids") or DEFAULT_RAZER_BT_READ_CHAR_UUIDS),
                 }
-            effective_timeout = float(timeout if timeout_override is None else timeout_override)
             return ble_vendor_transceive(
                 address=address,
                 name_query=name_query,
-                timeout=effective_timeout,
+                timeout=timeout,
                 key=key,
                 value_payload=value_payload,
                 response_timeout=response_timeout,
@@ -1045,22 +1034,8 @@ class MacOSBleBackend(Backend):
             _remember_runtime_resolution(payload)
             return payload
         except Exception as first_exc:
-            retry_exc: Optional[Exception] = None
-            if self._retryable_transport_error(first_exc):
-                # On unstable macOS BLE sessions, the first connect can fail even though
-                # a second attempt succeeds. Retry once with a larger timeout budget.
-                try:
-                    time.sleep(0.12)
-                    retry_timeout = min(45.0, max(timeout * 1.5, 18.0))
-                    payload = _tx(pinned_path, timeout_override=retry_timeout)
-                    _remember_runtime_resolution(payload)
-                    return payload
-                except Exception as exc:
-                    retry_exc = exc
-
-            root_exc: Exception = retry_exc or first_exc
-            if pinned_path is None and not self._missing_vendor_path_error(root_exc):
-                raise root_exc
+            if pinned_path is None and not self._missing_vendor_path_error(first_exc):
+                raise
 
             try:
                 discovered = discover_vendor_gatt_path(
@@ -1069,7 +1044,7 @@ class MacOSBleBackend(Backend):
                     timeout=min(timeout, 10.0),
                 )
             except Exception:
-                raise root_exc
+                raise first_exc
 
             self._store_vendor_path(handle, discovered)
             payload = _tx(discovered)

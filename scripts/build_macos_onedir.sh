@@ -27,6 +27,20 @@ PYTHONPYCACHEPREFIX=/tmp/razecli-pyc "$PYTHON" -m PyInstaller \
   --name razecli-onedir \
   --collect-all hid \
   --collect-all bleak \
+  --collect-all CoreBluetooth \
+  --collect-all Foundation \
+  --collect-all libdispatch \
+  --collect-all objc \
+  --collect-submodules bleak.backends.corebluetooth \
+  --hidden-import bleak.backends.corebluetooth.CentralManagerDelegate \
+  --hidden-import bleak.backends.corebluetooth.PeripheralDelegate \
+  --hidden-import bleak.backends.corebluetooth.client \
+  --hidden-import bleak.backends.corebluetooth.scanner \
+  --hidden-import bleak.backends.corebluetooth.utils \
+  --hidden-import CoreBluetooth \
+  --hidden-import Foundation \
+  --hidden-import libdispatch \
+  --hidden-import objc \
   --collect-submodules razecli.models \
   --collect-submodules razecli.backends \
   --collect-submodules razecli.ble \

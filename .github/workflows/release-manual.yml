@@ -22,11 +22,6 @@ on:
         required: true
         default: false
         type: boolean
-      update_readme:
-        description: Open PR to update README Homebrew URL to new tag
-        required: true
-        default: false
-        type: boolean
 
 concurrency:
   group: manual-release
@@ -37,7 +32,6 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
-      pull-requests: write
 
     steps:
       - name: Checkout
@@ -182,50 +176,3 @@ jobs:
             Previous tag: ${{ steps.version.outputs.latest }}
             Bump: ${{ inputs.bump }}
             Homebrew formula asset: razecli.rb
-
-      - name: Update README release tag URL
-        if: ${{ inputs.publish && inputs.update_readme }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          .venv/bin/python scripts/update_readme_release_tag.py \
-            --readme README.md \
-            --repository "${{ github.repository }}" \
-            --tag "${{ steps.version.outputs.next }}"
-          git diff -- README.md || true
-
-      - name: Commit README change and open PR
-        if: ${{ inputs.publish && inputs.update_readme }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- README.md; then
-            echo "README already points to current release tag."
-            exit 0
-          fi
-
-          tag="${{ steps.version.outputs.next }}"
-          branch="chore/readme-release-url-${tag}"
-          title="docs: update Homebrew release URL to ${tag}"
-          body=$'Automated README update from Manual Release workflow.\n\n- Release tag: '"${tag}"$'\n- Updated Homebrew formula URL in README.'
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git switch -c "${branch}"
-          git add README.md
-          git commit -m "${title}"
-          git push origin "${branch}" --force-with-lease
-
-          pr_url="https://github.com/${{ github.repository }}/pull/new/${branch}"
-          if gh pr view "${branch}" --json number >/dev/null 2>&1; then
-            if ! gh pr edit "${branch}" --title "${title}" --body "${body}"; then
-              echo "::warning::Could not update PR metadata automatically. Review manually: ${pr_url}"
-            fi
-          else
-            if ! gh pr create --base "${{ github.ref_name }}" --head "${branch}" --title "${title}" --body "${body}"; then
-              echo "::warning::GitHub Actions cannot create PR in this repository. Open manually: ${pr_url}"
-              echo "::warning::If you want auto-PR creation, enable: Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests."
-            fi
-          fi

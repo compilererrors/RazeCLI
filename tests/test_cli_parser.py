@@ -154,6 +154,152 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.attempts, 2)
         self.assertEqual(args.key, ["00850001", "0b850100"])
 
+    def test_ble_bank_probe_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "bank-probe",
+                "--address",
+                "02:11:22:33:44:55",
+                "--attempts",
+                "3",
+                "--key",
+                "0b840100",
+                "--key",
+                "0b840000",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "bank-probe")
+        self.assertEqual(args.address, "02:11:22:33:44:55")
+        self.assertEqual(args.attempts, 3)
+        self.assertEqual(args.key, ["0b840100", "0b840000"])
+        self.assertFalse(args.deep)
+        self.assertFalse(args.include_write_keys)
+        self.assertIsNone(args.settle_delay)
+        self.assertIsNone(args.reconnect_each_round)
+
+    def test_ble_bank_probe_deep_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "bank-probe",
+                "--address",
+                "02:11:22:33:44:55",
+                "--deep",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "bank-probe")
+        self.assertEqual(args.address, "02:11:22:33:44:55")
+        self.assertTrue(args.deep)
+        self.assertFalse(args.include_write_keys)
+
+    def test_ble_bank_snapshot_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "bank-snapshot",
+                "--address",
+                "02:11:22:33:44:55",
+                "--label",
+                "green-led-bank",
+                "--path",
+                "/tmp/bank_snapshots.json",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "bank-snapshot")
+        self.assertEqual(args.address, "02:11:22:33:44:55")
+        self.assertEqual(args.label, "green-led-bank")
+        self.assertEqual(args.path, "/tmp/bank_snapshots.json")
+        self.assertFalse(args.deep)
+        self.assertFalse(args.include_write_keys)
+        self.assertIsNone(args.settle_delay)
+        self.assertIsNone(args.reconnect_each_round)
+
+    def test_ble_bank_probe_round_control_flags_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "bank-probe",
+                "--address",
+                "02:11:22:33:44:55",
+                "--deep",
+                "--settle-delay",
+                "0.5",
+                "--reconnect-each-round",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "bank-probe")
+        self.assertTrue(args.deep)
+        self.assertFalse(args.include_write_keys)
+        self.assertEqual(args.settle_delay, 0.5)
+        self.assertTrue(args.reconnect_each_round)
+
+    def test_ble_bank_probe_include_write_keys_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "bank-probe",
+                "--address",
+                "02:11:22:33:44:55",
+                "--deep",
+                "--include-write-keys",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "bank-probe")
+        self.assertTrue(args.deep)
+        self.assertTrue(args.include_write_keys)
+
+    def test_ble_bank_snapshot_round_control_flags_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "bank-snapshot",
+                "--address",
+                "02:11:22:33:44:55",
+                "--deep",
+                "--settle-delay",
+                "0.6",
+                "--no-reconnect-each-round",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "bank-snapshot")
+        self.assertTrue(args.deep)
+        self.assertFalse(args.include_write_keys)
+        self.assertEqual(args.settle_delay, 0.6)
+        self.assertFalse(args.reconnect_each_round)
+
+    def test_ble_bank_compare_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "bank-compare",
+                "--label-a",
+                "bank-a",
+                "--label-b",
+                "bank-b",
+                "--path",
+                "/tmp/bank_snapshots.json",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "bank-compare")
+        self.assertEqual(args.label_a, "bank-a")
+        self.assertEqual(args.label_b, "bank-b")
+        self.assertEqual(args.path, "/tmp/bank_snapshots.json")
+
     def test_ble_alias_list_parse(self):
         parser = build_parser()
         args = parser.parse_args(["ble", "alias", "list"])

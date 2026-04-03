@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from razecli.cli_common import emit, resolve_target_device
 from razecli.device_service import DeviceService
@@ -91,6 +91,7 @@ def handle_rgb(service: DeviceService, args: argparse.Namespace) -> int:
             path=args.store_file,
         )
         hardware_apply = "fallback-local"
+        hardware_error: Optional[str] = None
         set_rgb = getattr(backend, "set_rgb", None)
         if callable(set_rgb):
             try:
@@ -103,11 +104,14 @@ def handle_rgb(service: DeviceService, args: argparse.Namespace) -> int:
                 if isinstance(hardware_rgb, dict):
                     rgb = _merge_rgb_state(rgb, hardware_rgb)
                 hardware_apply = "applied"
-            except CapabilityUnsupportedError:
+            except CapabilityUnsupportedError as exc:
                 hardware_apply = "fallback-local"
+                hardware_error = str(exc)
 
         rgb["hardware_apply"] = hardware_apply
         rgb["scope"] = "device+local" if hardware_apply == "applied" else "local-scaffold"
+        if hardware_error:
+            rgb["hardware_error"] = hardware_error
         emit(
             {
                 "status": "ok",

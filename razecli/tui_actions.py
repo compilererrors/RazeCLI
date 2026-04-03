@@ -6,8 +6,15 @@ import curses
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from razecli.dpi_stage_presets import (
+    delete_dpi_stage_preset,
+    list_dpi_stage_presets,
+    load_dpi_stage_preset,
+    save_dpi_stage_preset,
+)
 from razecli.dpi_autosync import autosync_enabled, load_autosync_settings, save_autosync_settings
 from razecli.errors import CapabilityUnsupportedError
 from razecli.feature_scaffolds import (
@@ -53,9 +60,12 @@ class TuiActionsMixin:
     def _ascii_mouse_diagram(cls, selected_button: Optional[str] = None) -> List[str]:
         selected = str(selected_button or "").strip()
 
-        def _mk(button: str, short_label: str) -> str:
+        def _mk(button: str, short_label: str, *, pad: bool = False) -> str:
             marker = ">" if selected == button else " "
-            return f"[{marker}{short_label}]"
+            label = str(short_label)
+            if pad:
+                label = label.ljust(3)
+            return f"[{marker}{label}]"
 
         m1 = _mk("left_click", "M1")
         m2 = _mk("right_click", "M2")
@@ -63,28 +73,28 @@ class TuiActionsMixin:
         m4 = _mk("side_1", "M4")
         m5 = _mk("side_2", "M5")
         dpi = _mk("dpi_cycle", "DPI")
+        m1_chip = _mk("left_click", "M1", pad=True)
+        m2_chip = _mk("right_click", "M2", pad=True)
+        m3_chip = _mk("middle_click", "M3", pad=True)
+        m4_chip = _mk("side_1", "M4", pad=True)
+        m5_chip = _mk("side_2", "M5", pad=True)
+        dpi_chip = _mk("dpi_cycle", "DPI", pad=True)
         selected_label = cls._button_label(selected) if selected else "-"
 
-        # Shape from user reference (asii2.txt); slots filled with live markers.
+        # Simple top-down mouse with labelled slots.
         return [
             "Mouse map:",
-            "       ,d88b",
-            "    ,8P'     `8,",
-            "    8'       __.8.__",
-            "   8       .'    |   '.",
-            f"         / {m1} | {m2}\\",
-            f"         |      {m3}    |",
-            f"    {m5}|       |       |",
-            f"    {m4}|---------------|",
-            "         |               |",
-            "         |               |",
-            "         |;             .|",
-            "         ;\\            /;",
-            "          \\\\         //",
-            "           \\'._ --_.'/",
-            "             '-....-'",
+            "        _______",
+            "      ,'    |    `.",
+            f"     / {m1} | {m2} \\",
+            "    |-----+-----|",
+            f"    |    {m3}    |",
+            f"   {m4}|   {dpi}   |",
+            f"   {m5}|         |",
+            "    |           |",
+            "     `.__.___.-'",
             "",
-            f"Buttons: {m1} {m2} {m3} {m4} {m5} {dpi}",
+            f"Buttons: {m1_chip} {m2_chip} {m3_chip} {m4_chip} {m5_chip} {dpi_chip}",
             f"Selected: {selected_label}",
         ]
 
@@ -98,6 +108,54 @@ class TuiActionsMixin:
         if width <= 1:
             return text[:width]
         return text[: width - 1] + "…"
+
+    @staticmethod
+    def _center_mouse_map_block(lines: Sequence[str], width: int) -> List[str]:
+        rows = [str(line) for line in lines]
+        if width <= 0 or not rows:
+            return rows
+
+        try:
+            start = rows.index("Mouse map:") + 1
+        except ValueError:
+            return rows
+
+        end = len(rows)
+        for idx in range(start, len(rows)):
+            if rows[idx] == "":
+                end = idx
+                break
+        if start >= end:
+            return rows
+
+        block = rows[start:end]
+        content_rows = [line for line in block if line.strip()]
+        if not content_rows:
+            return rows
+
+        def _leading_spaces(text: str) -> int:
+            stripped = text.lstrip(" ")
+            return len(text) - len(stripped)
+
+        common_indent = min(_leading_spaces(line) for line in content_rows)
+        normalized = [
+            line[common_indent:].rstrip() if line.strip() else ""
+            for line in block
+        ]
+        normalized_rows = [line for line in normalized if line.strip()]
+        if not normalized_rows:
+            return rows
+
+        block_width = max(len(line) for line in normalized_rows)
+        if block_width >= width:
+            return rows
+        left_pad = max(0, (width - block_width) // 2)
+        centered = [
+            (" " * left_pad + line) if line else ""
+            for line in normalized
+        ]
+        rows[start:end] = centered
+        return rows
 
     @staticmethod
     def _estimate_modal_text_width(stdscr) -> int:
@@ -136,6 +194,7 @@ class TuiActionsMixin:
         right_w = max(24, text_w - left_w - 3)
         if left_w + right_w + 3 > text_w:
             left_w = max(30, text_w - right_w - 3)
+        right_raw = self._center_mouse_map_block(right_raw, right_w)
 
         left_lines: List[str] = []
         right_lines: List[str] = []
@@ -914,6 +973,339 @@ class TuiActionsMixin:
         except Exception as exc:  # pragma: no cover - runtime/hardware dependent
             _on_error(exc)
 
+    def _apply_dpi_levels(
+        self,
+        device: DetectedDevice,
+        *,
+        active_stage: int,
+        stages: Sequence[Tuple[int, int]],
+    ) -> tuple[int, int]:
+        backend = self.service.resolve_backend(device)
+        level_rows = list((int(x), int(y)) for x, y in stages)
+        backend.set_dpi_stages(device, int(active_stage), level_rows)
+        mirror_ok, mirror_failed = mirror_to_transport_targets(
+            self.service,
+            device,
+            lambda peer: self.service.resolve_backend(peer).set_dpi_stages(peer, int(active_stage), level_rows),
+            required_capability="dpi-stages",
+        )
+        self._persist_autosync(device, backend)
+        return int(mirror_ok), int(mirror_failed)
+
+    def _validate_dpi_level(self, device: DetectedDevice, dpi_x: int, dpi_y: int) -> Optional[str]:
+        model = self.service.registry.get(device.model_id) if device.model_id else None
+        if model and model.dpi_min is not None and (dpi_x < model.dpi_min or dpi_y < model.dpi_min):
+            return f"DPI must be at least {model.dpi_min}"
+        if model and model.dpi_max is not None and (dpi_x > model.dpi_max or dpi_y > model.dpi_max):
+            return f"DPI must be <= {model.dpi_max}"
+        if dpi_x <= 0 or dpi_y <= 0:
+            return "Invalid DPI value"
+        return None
+
+    def _current_dpi_levels(self, device: DetectedDevice) -> Tuple[int, List[Tuple[int, int]]]:
+        backend = self.service.resolve_backend(device)
+        active = int(self.state.dpi_active_stage or 1)
+        stages = list(self.state.dpi_stages or [])
+        if not stages:
+            active, fetched = backend.get_dpi_stages(device)
+            stages = list(fetched)
+            active = int(active)
+        if not stages:
+            raise RuntimeError("No DPI profiles found on device")
+        if active < 1 or active > len(stages):
+            active = 1
+        normalized = [(int(x), int(y)) for x, y in stages]
+        return int(active), normalized
+
+    def _edit_dpi_levels(self, stdscr) -> None:
+        device = self._selected()
+        if device is None:
+            self.status = "No device selected"
+            return
+        if self._is_detect_only_backend(device):
+            self.status = "Selected backend is detect-only (macos-profiler); DPI profile control is unavailable"
+            return
+        if "dpi-stages" not in device.capabilities:
+            self.status = "Selected device does not support DPI profiles"
+            return
+
+        action_default = 0
+        while True:
+            selected_action = self._select_menu(
+                stdscr,
+                title="DPI Levels",
+                description=(
+                    "Configure wheel/button DPI levels.\n"
+                    "Tip: switch mouse onboard profile (underside button) first if you want per-profile settings."
+                ),
+                options=[
+                    "Quick generate levels (count + base + increment)",
+                    "Adjust level count",
+                    "Save current levels as preset",
+                    "Load levels preset",
+                    "Delete levels preset",
+                ],
+                default_index=action_default,
+                footer="Up/Down select | Enter confirm | Esc close",
+            )
+            if selected_action is None:
+                return
+            action_default = int(selected_action)
+
+            if selected_action == 1:
+                self._set_dpi_profile_count(stdscr)
+                continue
+
+            if selected_action == 0:
+                try:
+                    active_stage, current_stages = self._current_dpi_levels(device)
+                except Exception as exc:
+                    self._set_status(f"Could not read DPI profiles: {exc}", hold_seconds=8.0)
+                    continue
+
+                default_count = len(current_stages)
+                default_base = int(current_stages[0][0]) if current_stages else 800
+                default_increment = (
+                    int(current_stages[1][0]) - int(current_stages[0][0])
+                    if len(current_stages) >= 2
+                    else 400
+                )
+                if default_increment <= 0:
+                    default_increment = 400
+
+                target_count = self._prompt_int(
+                    stdscr,
+                    f"Number of DPI levels (1-{MAX_DPI_STAGES})",
+                    default_count,
+                    help_text="How many levels the DPI up/down button should cycle through.",
+                )
+                if target_count is None:
+                    continue
+                if target_count < 1 or target_count > MAX_DPI_STAGES:
+                    self._show_action_dialog(
+                        stdscr,
+                        title="Invalid count",
+                        message=f"DPI level count must be between 1 and {MAX_DPI_STAGES}.",
+                    )
+                    continue
+
+                base_dpi = self._prompt_int(
+                    stdscr,
+                    "Base DPI (level 1)",
+                    default_base,
+                    help_text="First level DPI value.",
+                )
+                if base_dpi is None:
+                    continue
+                increment = self._prompt_int(
+                    stdscr,
+                    "Increment per level",
+                    default_increment,
+                    help_text="Each next level is previous + increment.",
+                )
+                if increment is None:
+                    continue
+                if increment <= 0:
+                    self._show_action_dialog(
+                        stdscr,
+                        title="Invalid increment",
+                        message="Increment must be greater than zero.",
+                    )
+                    continue
+
+                active_default = min(max(1, int(active_stage)), int(target_count))
+                new_active = self._prompt_int(
+                    stdscr,
+                    f"Active level after apply (1-{target_count})",
+                    active_default,
+                    help_text="Which generated level should be active after write.",
+                )
+                if new_active is None:
+                    continue
+                if new_active < 1 or new_active > target_count:
+                    self._show_action_dialog(
+                        stdscr,
+                        title="Invalid active level",
+                        message=f"Active level must be between 1 and {target_count}.",
+                    )
+                    continue
+
+                generated = []
+                invalid_message: Optional[str] = None
+                for idx in range(int(target_count)):
+                    value = int(base_dpi) + (idx * int(increment))
+                    invalid_message = self._validate_dpi_level(device, value, value)
+                    if invalid_message:
+                        break
+                    generated.append((value, value))
+                if invalid_message:
+                    self._show_action_dialog(
+                        stdscr,
+                        title="Invalid DPI levels",
+                        message=invalid_message,
+                    )
+                    continue
+
+                try:
+                    mirror_ok, mirror_failed = self._run_with_modal(
+                        stdscr,
+                        title="DPI Levels",
+                        description="Applying generated levels",
+                        footer="Writing DPI level table",
+                        work=lambda: self._apply_dpi_levels(
+                            device,
+                            active_stage=int(new_active),
+                            stages=generated,
+                        ),
+                    )
+                    if mirror_ok or mirror_failed:
+                        self.status = (
+                            f"DPI levels updated: {len(generated)} levels (active {new_active})"
+                            f" | mirrored={mirror_ok} failed={mirror_failed}"
+                        )
+                    else:
+                        self.status = f"DPI levels updated: {len(generated)} levels (active {new_active})"
+                    self._schedule_state_refresh(force=True)
+                except Exception as exc:
+                    self._set_status(f"Could not apply DPI levels: {exc}", hold_seconds=8.0)
+                continue
+
+            if selected_action == 2:
+                try:
+                    active_stage, stages = self._current_dpi_levels(device)
+                except Exception as exc:
+                    self._set_status(f"Could not read DPI profiles: {exc}", hold_seconds=8.0)
+                    continue
+
+                default_name = f"levels-{datetime.now().strftime('%m%d-%H%M')}"
+                preset_name = self._prompt_text(
+                    stdscr,
+                    "Preset name",
+                    default_name,
+                    help_text="Save current DPI levels under this name.",
+                    max_len=40,
+                )
+                if preset_name is None:
+                    continue
+                normalized_name = str(preset_name).strip()
+                if not normalized_name:
+                    self._show_action_dialog(
+                        stdscr,
+                        title="Invalid preset name",
+                        message="Preset name cannot be empty.",
+                    )
+                    continue
+                try:
+                    path = save_dpi_stage_preset(
+                        name=normalized_name,
+                        model_id=device.model_id,
+                        active_stage=int(active_stage),
+                        stages=stages,
+                    )
+                    self.status = f"Saved DPI preset '{normalized_name}' ({path})"
+                except Exception as exc:
+                    self._set_status(f"Could not save DPI preset: {exc}", hold_seconds=8.0)
+                continue
+
+            try:
+                presets = list_dpi_stage_presets()
+            except Exception as exc:
+                self._set_status(f"Could not read DPI presets: {exc}", hold_seconds=8.0)
+                continue
+            if not presets:
+                self._set_status("No DPI presets saved yet", hold_seconds=6.0)
+                continue
+
+            options = []
+            names = []
+            for row in presets:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "").strip()
+                if not name:
+                    continue
+                names.append(name)
+                options.append(
+                    f"{name}  ({row.get('stages_count')} levels, model={row.get('model_id') or '-'})"
+                )
+            if not names:
+                self._set_status("No valid DPI presets found", hold_seconds=6.0)
+                continue
+
+            selected_idx = self._select_menu(
+                stdscr,
+                title="DPI Presets",
+                description="Select preset",
+                options=options,
+                default_index=0,
+                footer="Up/Down select | Enter confirm | Esc back",
+            )
+            if selected_idx is None:
+                continue
+            target_name = names[int(selected_idx)]
+
+            if selected_action == 4:
+                try:
+                    path = delete_dpi_stage_preset(target_name)
+                    self.status = f"Deleted DPI preset '{target_name}' ({path})"
+                except Exception as exc:
+                    self._set_status(f"Could not delete DPI preset: {exc}", hold_seconds=8.0)
+                continue
+
+            try:
+                preset = load_dpi_stage_preset(target_name)
+            except Exception as exc:
+                self._set_status(f"Could not load preset '{target_name}': {exc}", hold_seconds=8.0)
+                continue
+
+            preset_model = str(preset.get("model_id") or "").strip()
+            device_model = str(device.model_id or "").strip()
+            if preset_model and device_model and preset_model != device_model:
+                confirm = self._select_menu(
+                    stdscr,
+                    title="Model mismatch",
+                    description=(
+                        f"Preset model is '{preset_model}', device model is '{device_model}'.\n"
+                        "Load anyway?"
+                    ),
+                    options=["Load anyway", "Cancel"],
+                    default_index=1,
+                    footer="Enter confirm | Esc cancel",
+                )
+                if confirm is None or int(confirm) != 0:
+                    continue
+
+            preset_stages = list(preset.get("stages") or [])
+            preset_active = int(preset.get("active_stage") or 1)
+            if not preset_stages:
+                self._set_status(f"Preset '{target_name}' has no levels", hold_seconds=8.0)
+                continue
+            if preset_active < 1 or preset_active > len(preset_stages):
+                preset_active = 1
+
+            try:
+                mirror_ok, mirror_failed = self._run_with_modal(
+                    stdscr,
+                    title="DPI Levels",
+                    description=f"Applying preset '{target_name}'",
+                    footer="Writing DPI level table",
+                    work=lambda: self._apply_dpi_levels(
+                        device,
+                        active_stage=int(preset_active),
+                        stages=[(int(x), int(y)) for x, y in preset_stages],
+                    ),
+                )
+                if mirror_ok or mirror_failed:
+                    self.status = (
+                        f"Loaded DPI preset '{target_name}'"
+                        f" | mirrored={mirror_ok} failed={mirror_failed}"
+                    )
+                else:
+                    self.status = f"Loaded DPI preset '{target_name}'"
+                self._schedule_state_refresh(force=True)
+            except Exception as exc:
+                self._set_status(f"Could not apply preset '{target_name}': {exc}", hold_seconds=8.0)
+
     def _prompt_int(
         self,
         stdscr,
@@ -1293,6 +1685,7 @@ class TuiActionsMixin:
             hardware_apply = "applied"
         except CapabilityUnsupportedError:
             hardware_apply = "fallback-local"
+            result["hardware_error"] = "Hardware RGB apply was unavailable; saved locally only"
         result["hardware_apply"] = hardware_apply
         rgb_cache = getattr(self, "_rgb_cache", None)
         if isinstance(rgb_cache, dict):
@@ -1483,7 +1876,7 @@ class TuiActionsMixin:
                 options=[
                     "Apply preset",
                     "Manual edit",
-                    "Save current as preset",
+                    "Save current as preset (local only)",
                     "Delete preset",
                 ],
                 default_index=action_default,
@@ -1536,11 +1929,18 @@ class TuiActionsMixin:
                             current = dict(rgb_state)
                             current_mode, current_brightness, current_color, supported_modes, modes_raw = _sync_from_state(current)
                         apply_state = str(rgb_state.get("hardware_apply") or "unknown")
-                        self.status = (
-                            f"RGB preset '{preset_name}' applied: "
-                            f"{rgb_state.get('mode')} {rgb_state.get('brightness')}% "
-                            f"#{rgb_state.get('color')} ({apply_state})"
-                        )
+                        if apply_state == "applied":
+                            self.status = (
+                                f"RGB preset '{preset_name}' applied: "
+                                f"{rgb_state.get('mode')} {rgb_state.get('brightness')}% "
+                                f"#{rgb_state.get('color')}"
+                            )
+                        else:
+                            err = str(rgb_state.get("hardware_error") or "Hardware write failed")
+                            self.status = (
+                                f"RGB preset '{preset_name}' saved locally only "
+                                f"({err})"
+                            )
                     except Exception as exc:
                         self._set_status(f"Could not apply RGB preset: {exc}", hold_seconds=8.0)
                     break
@@ -1643,10 +2043,16 @@ class TuiActionsMixin:
                             current = dict(rgb_state)
                             current_mode, current_brightness, current_color, supported_modes, modes_raw = _sync_from_state(current)
                         apply_state = str(rgb_state.get("hardware_apply") or "unknown")
-                        self.status = (
-                            f"RGB updated: {rgb_state.get('mode')} {rgb_state.get('brightness')}% "
-                            f"#{rgb_state.get('color')} ({apply_state})"
-                        )
+                        if apply_state == "applied":
+                            self.status = (
+                                f"RGB updated: {rgb_state.get('mode')} {rgb_state.get('brightness')}% "
+                                f"#{rgb_state.get('color')}"
+                            )
+                        else:
+                            err = str(rgb_state.get("hardware_error") or "Hardware write failed")
+                            self.status = (
+                                f"RGB saved locally only ({err})"
+                            )
                     except Exception as exc:
                         self._set_status(f"Could not set RGB: {exc}", hold_seconds=8.0)
                     break
@@ -1679,7 +2085,9 @@ class TuiActionsMixin:
                         color=current_color,
                     )
                     presets = dict(updated_presets)
-                    self.status = f"Saved RGB preset '{normalized_name}'"
+                    self.status = (
+                        f"Saved RGB preset '{normalized_name}' (local preset only; no hardware write)"
+                    )
                 except Exception as exc:
                     self._set_status(f"Could not save preset: {exc}", hold_seconds=8.0)
                 continue
@@ -1687,7 +2095,14 @@ class TuiActionsMixin:
             preset_names = [
                 name
                 for name in presets.keys()
-                if name not in {"off", "static-green", "breathing-warm", "spectrum-medium"}
+                if name
+                not in {
+                    "off",
+                    "static-green",
+                    "breathing-green-60",
+                    "breathing-warm",
+                    "spectrum-medium",
+                }
             ]
             if not preset_names:
                 self._set_status("No custom RGB presets to delete", hold_seconds=6.0)

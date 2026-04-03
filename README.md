@@ -1,10 +1,12 @@
 # RazeCLI
 
-Modular CLI/TUI for detecting and configuring Razer mice.
+RazeCLI exists to make on-the-fly Razer mouse changes simple over USB, 2.4G dongle, and Bluetooth.
 
-RazeCLI is a lightweight CLI and TUI focused on practical mouse settings, mainly DPI and poll-rate, with macOS as a key target where official lightweight tooling is limited.
-The current scope is stable read/write for DPI, DPI stages, poll-rate, and battery where supported.
-RGB and button mapping are now available as local scaffolds (command contract + local persistence), with hardware write support planned next.
+The goal is a fast, lightweight, open source tool that avoids heavy vendor software installs.
+Current focus is practical settings: DPI, DPI stages, poll-rate, and battery where supported.
+RGB and button mapping now run hardware-first on supported backends (currently experimental on `macos-ble` for DA V2 Pro), with local fallback persistence when unsupported.
+
+![RazeCLI TUI screenshot](assets/tuiScreenShot.png)
 
 Supported models:
 - `deathadder-v2-pro` (`1532:007C`, `1532:007D`, `1532:008E`)
@@ -17,7 +19,9 @@ Supported models:
 - USB mode (`007C`) and 2.4G dongle mode (`007D`) are the most stable paths.
 - Bluetooth endpoint (`008E`) is handled by a dedicated macOS GATT backend: `macos-ble`.
 - Bluetooth support is still experimental on macOS and connect/discovery can fail on some hosts.
-- Poll-rate over Bluetooth has an experimental key-probe implementation in `macos-ble` and may require per-device key overrides.
+- Poll-rate over Bluetooth has experimental support in `macos-ble` and is enabled by default.
+- Set `RAZECLI_BLE_POLL_CAP=0` to hide/disable BT poll-rate capability when debugging unstable hosts.
+- Poll-rate over Bluetooth may require per-device key overrides (`RAZECLI_BLE_POLL_READ_KEYS` / `RAZECLI_BLE_POLL_WRITE_KEYS`).
 - Protocol framing follows known Razer packet structure, with additional BLE reverse-engineering work.
 - Most real-hardware validation has been done on DeathAdder V2 Pro. Other models may need key/path tuning; see `Adding BT Support for More Razer Models`.
 
@@ -30,8 +34,8 @@ Supported models:
 - DPI stage presets (save/load/list/delete)
 - Poll-rate get/set
 - Battery level (when backend/device supports it)
-- Local RGB scaffold (`rgb get/set`) for DA V2 Pro integration work
-- Local button-mapping scaffold (`button-mapping get/set/reset/actions`) for DA V2 Pro integration work
+- RGB command path with hardware-first + local fallback behavior
+- Button-mapping command path with hardware-first + local fallback behavior
 - JSON output for scripting
 
 ## Feature Gap (Local Backends)
@@ -52,14 +56,14 @@ Supported models:
   Next local priority: add retry/backoff and host-specific fallback paths.
 
 - **RGB**
-  Available now: local scaffold API + persistence.
-  Missing for production: device-side HID/BLE packet mapping and write/verify loops.
-  Next local priority: implement DA V2 Pro hardware mapping first.
+  Available now: experimental DA V2 Pro hardware path on `macos-ble` (`off/static` + brightness/color), with local fallback persistence.
+  Missing for production: robust multi-mode effect mapping, rawhid parity, and wider model validation.
+  Next local priority: stabilize additional RGB modes and add `rawhid` parity.
 
 - **Button mapping**
-  Available now: local scaffold API + persistence.
-  Missing for production: device-side button-binding packet mapping + validation.
-  Next local priority: implement DA V2 Pro hardware mapping first.
+  Available now: experimental DA V2 Pro hardware path on `macos-ble` for basic actions (`mouse:*`, `dpi:cycle`, `disabled`), with local fallback persistence.
+  Missing for production: full action taxonomy, rawhid parity, and per-model slot validation.
+  Next local priority: broaden action coverage and add `rawhid` support.
 
 - **RGB/button UX**
   Available now: CLI contract exists.
@@ -68,8 +72,8 @@ Supported models:
 
 ## Next Local Priorities
 
-1. Implement DA V2 Pro RGB hardware read/write in `rawhid` first, then `macos-ble`.
-2. Implement DA V2 Pro button-mapping hardware read/write in `rawhid` first, then `macos-ble`.
+1. Add DA V2 Pro RGB hardware parity in `rawhid` (after current `macos-ble` path).
+2. Add DA V2 Pro button-mapping hardware parity in `rawhid` (after current `macos-ble` path).
 3. Add TUI pages for RGB/button editing after hardware calls are stable.
 4. Extend model coverage only after DA V2 Pro paths are validated with repeatable tests.
 
@@ -230,14 +234,14 @@ Read battery:
 razecli battery get
 ```
 
-Local RGB scaffold (stored locally, does not write device firmware yet):
+RGB (hardware-first when backend supports it, local fallback otherwise):
 
 ```bash
 razecli rgb get
 razecli rgb set --mode static --brightness 55 --color 00ff88
 ```
 
-Local button-mapping scaffold (stored locally, does not write device firmware yet):
+Button mapping (hardware-first when backend supports it, local fallback otherwise):
 
 ```bash
 razecli button-mapping get
@@ -343,8 +347,8 @@ razecli --backend macos-ble dpi get --model deathadder-v2-pro
 Experimental BT poll-rate mapping (vendor keys):
 
 ```bash
-# Optional: expose poll-rate capability in macos-ble device listing/TUI
-RAZECLI_BLE_POLL_CAP=1 razecli --backend macos-ble devices --model deathadder-v2-pro
+# Optional: hide/disable BT poll-rate capability in macos-ble listing/TUI
+RAZECLI_BLE_POLL_CAP=0 razecli --backend macos-ble devices --model deathadder-v2-pro
 
 # Optional: override candidate vendor keys for poll read/write
 RAZECLI_BLE_POLL_READ_KEYS=00850001,00850000 \

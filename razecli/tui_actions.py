@@ -5,7 +5,7 @@ from __future__ import annotations
 import curses
 import os
 import time
-from typing import Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from razecli.dpi_autosync import autosync_enabled, load_autosync_settings, save_autosync_settings
 from razecli.errors import CapabilityUnsupportedError
@@ -157,6 +157,7 @@ class TuiActionsMixin:
             state = DeviceState()
             bt_experimental = self._is_bt_008e(device)
             bt_read_failed = False
+            bt_failed_fields: List[str] = []
 
             if "dpi-stages" in device.capabilities:
                 try:
@@ -170,6 +171,7 @@ class TuiActionsMixin:
                 except Exception as exc:  # pragma: no cover - runtime/hardware dependent
                     if bt_experimental:
                         bt_read_failed = True
+                        bt_failed_fields.append("dpi profiles")
                     else:
                         if not self._status_locked():
                             self.status = f"Could not read DPI profiles: {exc}"
@@ -180,6 +182,7 @@ class TuiActionsMixin:
                 except Exception as exc:  # pragma: no cover - runtime/hardware dependent
                     if bt_experimental:
                         bt_read_failed = True
+                        bt_failed_fields.append("dpi")
                     else:
                         if not self._status_locked():
                             self.status = f"Could not read DPI: {exc}"
@@ -189,7 +192,11 @@ class TuiActionsMixin:
                     state.poll_rate = backend.get_poll_rate(device)
                 except Exception as exc:  # pragma: no cover - runtime/hardware dependent
                     if bt_experimental:
-                        bt_read_failed = True
+                        if cached_state is not None and cached_state.poll_rate is not None:
+                            state.poll_rate = int(cached_state.poll_rate)
+                        else:
+                            bt_read_failed = True
+                            bt_failed_fields.append("poll-rate")
                     else:
                         if not self._status_locked():
                             self.status = f"Could not read poll-rate: {exc}"
@@ -213,6 +220,7 @@ class TuiActionsMixin:
                             state.battery = int(cached_state.battery)
                         if bt_experimental:
                             bt_read_failed = True
+                            bt_failed_fields.append("battery")
                         else:
                             if not self._status_locked():
                                 self.status = f"Could not read battery: {exc}"
@@ -221,7 +229,14 @@ class TuiActionsMixin:
             self._state_cache[device.identifier] = self._clone_state(state)
             self._state_refreshed_at[device.identifier] = now
             if bt_read_failed and not self._status_locked():
-                self.status = "Bluetooth mode (1532:008E) is experimental; some values may be unavailable"
+                failed = ", ".join(sorted(set(bt_failed_fields)))
+                if failed:
+                    self.status = (
+                        "Bluetooth mode (1532:008E) is experimental; "
+                        f"could not read: {failed}"
+                    )
+                else:
+                    self.status = "Bluetooth mode (1532:008E) is experimental; some values may be unavailable"
         finally:
             if self._state_loading_device_id == device.identifier:
                 self._state_loading_device_id = None

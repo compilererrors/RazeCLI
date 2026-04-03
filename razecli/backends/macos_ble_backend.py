@@ -20,7 +20,7 @@ from razecli.types import DetectedDevice
 
 RAZER_VENDOR_ID = 0x1532
 DEFAULT_BLE_PRODUCT_IDS = frozenset({0x008E, 0x0083})
-BLE_CAPABILITIES = frozenset({"battery", "dpi", "dpi-stages"})
+BLE_CAPABILITIES = frozenset({"battery", "dpi", "dpi-stages", "rgb", "button-mapping"})
 
 KEY_BATTERY_RAW_READ = bytes.fromhex("05810001")
 KEY_BATTERY_STATUS_READ = bytes.fromhex("05800001")
@@ -28,8 +28,13 @@ KEY_DPI_STAGES_READ = bytes.fromhex("0B840100")
 KEY_DPI_STAGES_WRITE = bytes.fromhex("0B040100")
 DEFAULT_DPI_READ_KEYS = ("0b840100", "0b840000")
 DEFAULT_DPI_WRITE_KEYS = ("0b040100", "0b040000")
-DEFAULT_POLL_READ_KEYS = ("00850001", "00850000", "0b850100")
-DEFAULT_POLL_WRITE_KEYS = ("00050001", "00050000", "0b050100")
+DEFAULT_POLL_READ_KEYS = ("00850001", "00850000", "00850100", "0b850100", "0b850000")
+DEFAULT_POLL_WRITE_KEYS = ("00050001", "00050000", "00050100", "0b050100", "0b050000")
+DEFAULT_RGB_BRIGHTNESS_READ_KEYS = ("10850101", "10850100")
+DEFAULT_RGB_BRIGHTNESS_WRITE_KEYS = ("10050100", "10050101")
+KEY_RGB_FRAME_READ = bytes.fromhex("10840000")
+KEY_RGB_FRAME_WRITE = bytes.fromhex("10040000")
+KEY_RGB_MODE_WRITE = bytes.fromhex("10030000")
 PRIMARY_VENDOR_READ_CHAR_UUID = "52401525-f97c-7f90-0e7f-6c6f4e36db1c"
 BATTERY_LEVEL_CHAR_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 POLL_RATE_TO_CODE = {
@@ -42,6 +47,35 @@ MAX_DPI_STAGES = 5
 MIN_PLAUSIBLE_DPI = 100
 MAX_PLAUSIBLE_DPI = 30000
 DEFAULT_NAME_QUERY = "DA V2 Pro"
+RGB_MODES = ("off", "static", "breathing", "spectrum")
+
+BUTTON_SLOT_BY_NAME = {
+    "left_click": 0x01,
+    "right_click": 0x02,
+    "middle_click": 0x03,
+    "side_1": 0x04,
+    "side_2": 0x05,
+    "dpi_cycle": 0x60,
+}
+
+DEFAULT_BUTTON_MAPPING = {
+    "left_click": "mouse:left",
+    "right_click": "mouse:right",
+    "middle_click": "mouse:middle",
+    "side_1": "mouse:back",
+    "side_2": "mouse:forward",
+    "dpi_cycle": "dpi:cycle",
+}
+
+BUTTON_ACTIONS = (
+    "mouse:left",
+    "mouse:right",
+    "mouse:middle",
+    "mouse:back",
+    "mouse:forward",
+    "dpi:cycle",
+    "disabled",
+)
 
 
 class MacOSBleBackend(Backend):
@@ -51,7 +85,7 @@ class MacOSBleBackend(Backend):
         self.last_error = None
         self._supported = platform.system() == "Darwin"
         self._ble_product_ids = self._load_product_ids()
-        self._poll_capability_enabled = self._env_flag("RAZECLI_BLE_POLL_CAP", default=False)
+        self._poll_capability_enabled = self._env_flag("RAZECLI_BLE_POLL_CAP", default=True)
         self._rawhid = RawHidBackend()
         self._profiler = MacOSProfilerBackend()
         if not self._supported:
@@ -265,10 +299,154 @@ class MacOSBleBackend(Backend):
                 return ordered
         return keys
 
+    def _rgb_brightness_read_keys(self, handle: Dict[str, object]) -> List[bytes]:
+        keys = self._parse_hex_key_list(
+            str(os.getenv("RAZECLI_BLE_RGB_READ_KEYS", "")).strip(),
+            default_tokens=DEFAULT_RGB_BRIGHTNESS_READ_KEYS,
+        )
+        pinned_hex = str(handle.get("ble_rgb_read_key") or "").strip().lower()
+        if pinned_hex:
+            try:
+                pinned = bytes.fromhex(pinned_hex)
+            except ValueError:
+                pinned = b""
+            if len(pinned) == 4:
+                ordered = [pinned]
+                ordered.extend(key for key in keys if key != pinned)
+                return ordered
+        return keys
+
+    def _rgb_brightness_write_keys(self, handle: Dict[str, object]) -> List[bytes]:
+        keys = self._parse_hex_key_list(
+            str(os.getenv("RAZECLI_BLE_RGB_WRITE_KEYS", "")).strip(),
+            default_tokens=DEFAULT_RGB_BRIGHTNESS_WRITE_KEYS,
+        )
+        pinned_hex = str(handle.get("ble_rgb_write_key") or "").strip().lower()
+        if pinned_hex:
+            try:
+                pinned = bytes.fromhex(pinned_hex)
+            except ValueError:
+                pinned = b""
+            if len(pinned) == 4:
+                ordered = [pinned]
+                ordered.extend(key for key in keys if key != pinned)
+                return ordered
+        return keys
+
+    @staticmethod
+    def _normalize_color_hex(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text.startswith("#"):
+            text = text[1:]
+        if len(text) != 6 or any(ch not in "0123456789abcdef" for ch in text):
+            raise CapabilityUnsupportedError("RGB color must be a 6-digit hex value, for example 00ff88")
+        return text
+
+    @staticmethod
+    def _rgb_percent_to_u8(value: int) -> int:
+        clamped = max(0, min(100, int(value)))
+        return int(round((clamped / 100.0) * 255.0))
+
+    @staticmethod
+    def _rgb_u8_to_percent(value: int) -> int:
+        clamped = max(0, min(255, int(value)))
+        return int(round((clamped / 255.0) * 100.0))
+
+    @staticmethod
+    def _slot_from_button_name(button: str) -> int:
+        slot = BUTTON_SLOT_BY_NAME.get(str(button).strip())
+        if slot is None:
+            supported = ", ".join(sorted(BUTTON_SLOT_BY_NAME))
+            raise CapabilityUnsupportedError(f"Unsupported button '{button}'. Supported: {supported}")
+        return int(slot)
+
+    @staticmethod
+    def _button_name_from_slot(slot: int) -> Optional[str]:
+        for name, value in BUTTON_SLOT_BY_NAME.items():
+            if int(value) == int(slot):
+                return name
+        return None
+
+    @staticmethod
+    def _build_ble_button_payload(slot: int, action: str) -> bytes:
+        action_value = str(action).strip().lower()
+        if action_value == "mouse:left":
+            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00])
+        if action_value == "mouse:right":
+            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00])
+        if action_value == "mouse:middle":
+            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00])
+        if action_value == "mouse:back":
+            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00])
+        if action_value == "mouse:forward":
+            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00])
+        if action_value == "dpi:cycle":
+            return bytes([0x01, slot, 0x00, 0x06, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00])
+        if action_value == "disabled":
+            # Layer clear/default payload observed in BLE captures.
+            return bytes([0x01, slot, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        raise CapabilityUnsupportedError(
+            f"Unsupported action '{action}'. Supported: {', '.join(BUTTON_ACTIONS)}"
+        )
+
+    @staticmethod
+    def _decode_ble_button_payload(slot: int, payload: bytes) -> Optional[str]:
+        if len(payload) < 6:
+            return None
+        if int(payload[0]) != 0x01:
+            return None
+        if int(payload[1]) != int(slot):
+            return None
+
+        action_class = int(payload[3])
+        action_len = int(payload[4])
+        data = list(payload[5 : 5 + max(0, min(action_len, 5))])
+
+        if action_class == 0x00:
+            return "disabled"
+        if action_class == 0x01 and action_len >= 1 and data:
+            button_id = int(data[0])
+            if button_id == 0x01:
+                return "mouse:left"
+            if button_id == 0x02:
+                return "mouse:right"
+            if button_id == 0x03:
+                return "mouse:middle"
+            if button_id == 0x04:
+                return "mouse:back"
+            if button_id == 0x05:
+                return "mouse:forward"
+            return None
+        if action_class == 0x06 and action_len >= 1 and data and int(data[0]) == 0x06:
+            return "dpi:cycle"
+        return None
+
+    @staticmethod
+    def _rgb_color_from_payload(payload: bytes) -> Optional[str]:
+        if len(payload) >= 8 and int(payload[0]) == 0x04:
+            r = int(payload[5])
+            g = int(payload[6])
+            b = int(payload[7])
+            return f"{r:02x}{g:02x}{b:02x}"
+        if len(payload) >= 4:
+            r = int(payload[1])
+            g = int(payload[2])
+            b = int(payload[3])
+            return f"{r:02x}{g:02x}{b:02x}"
+        return None
+
     @staticmethod
     def _decode_poll_rate_payload(payload: bytes) -> Optional[int]:
         if not payload:
             return None
+
+        # Some BLE paths prepend a small header/varstore byte before the poll code.
+        if len(payload) >= 2 and int(payload[0]) in {0x00, 0x01, 0x02}:
+            prefixed = CODE_TO_POLL_RATE.get(int(payload[1]))
+            if prefixed is not None:
+                return int(prefixed)
 
         candidates: List[int] = []
         if payload:
@@ -368,6 +546,24 @@ class MacOSBleBackend(Backend):
             value = float(raw)
         except ValueError:
             value = 0.18
+        return max(0.0, min(1.5, value))
+
+    @staticmethod
+    def _poll_read_attempts() -> int:
+        raw = str(os.getenv("RAZECLI_BLE_POLL_READ_ATTEMPTS", "3")).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 3
+        return max(1, min(8, value))
+
+    @staticmethod
+    def _poll_read_retry_delay() -> float:
+        raw = str(os.getenv("RAZECLI_BLE_POLL_READ_RETRY_DELAY", "0.12")).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.12
         return max(0.0, min(1.5, value))
 
     def _detect_from_rawhid(self, profiler_rows: Sequence[DetectedDevice]) -> List[DetectedDevice]:
@@ -1040,17 +1236,31 @@ class MacOSBleBackend(Backend):
         handle = self._device_handle(device)
         read_keys = self._poll_read_keys(handle)
         attempted: List[str] = []
-        for key in read_keys:
-            attempted.append(key.hex())
-            try:
-                result = self._vendor_call(device=device, key=key)
-                payload = self._decode_payload_bytes(result, key=key)
-            except Exception:
-                continue
-            decoded = self._decode_poll_rate_payload(payload)
-            if decoded is not None:
-                handle["ble_poll_read_key"] = key.hex()
-                return int(decoded)
+        read_attempts = self._poll_read_attempts()
+        retry_delay = self._poll_read_retry_delay()
+        for _ in range(read_attempts):
+            for key in read_keys:
+                attempted.append(key.hex())
+                try:
+                    result = self._vendor_call(device=device, key=key)
+                    payload = self._decode_payload_bytes(result, key=key)
+                except Exception:
+                    continue
+                decoded = self._decode_poll_rate_payload(payload)
+                if decoded is not None:
+                    handle["ble_poll_read_key"] = key.hex()
+                    handle["ble_poll_rate_hz"] = int(decoded)
+                    return int(decoded)
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+
+        cached = handle.get("ble_poll_rate_hz")
+        try:
+            cached_hz = int(cached) if cached is not None else None
+        except Exception:
+            cached_hz = None
+        if cached_hz in (125, 500, 1000):
+            return int(cached_hz)
         raise CapabilityUnsupportedError(
             "Poll-rate over Bluetooth is not mapped for this device/host. "
             f"Tried read keys: {attempted}"
@@ -1079,6 +1289,7 @@ class MacOSBleBackend(Backend):
                     continue
                 if int(current) == hz:
                     handle["ble_poll_write_key"] = key.hex()
+                    handle["ble_poll_rate_hz"] = int(hz)
                     return
 
         raise CapabilityUnsupportedError(
@@ -1192,6 +1403,210 @@ class MacOSBleBackend(Backend):
         if isinstance(last_err, Exception):
             raise CapabilityUnsupportedError("Battery response over BLE does not include payload") from last_err
         raise CapabilityUnsupportedError("Battery response over BLE does not include payload")
+
+    def get_rgb(self, device: DetectedDevice) -> Dict[str, Any]:
+        handle = self._device_handle(device)
+        read_keys = self._rgb_brightness_read_keys(handle)
+
+        brightness_percent: Optional[int] = None
+        for key in read_keys:
+            try:
+                result = self._vendor_call(device=device, key=key)
+                payload = self._decode_payload_bytes(result, key=key)
+            except Exception:
+                continue
+            if not payload:
+                continue
+            brightness_percent = self._rgb_u8_to_percent(int(payload[0]))
+            handle["ble_rgb_read_key"] = key.hex()
+            break
+
+        if brightness_percent is None:
+            raise CapabilityUnsupportedError("Could not read RGB brightness over BLE")
+
+        color_hex: Optional[str] = None
+        try:
+            frame_result = self._vendor_call(device=device, key=KEY_RGB_FRAME_READ)
+            frame_payload = self._decode_payload_bytes(frame_result, key=KEY_RGB_FRAME_READ)
+            color_hex = self._rgb_color_from_payload(frame_payload)
+        except Exception:
+            color_hex = None
+
+        if color_hex is None:
+            cached_color = self._normalize_color_hex(str(handle.get("ble_rgb_color") or "").strip() or None)
+            color_hex = cached_color or "00ff00"
+
+        mode = "off" if brightness_percent <= 0 else str(handle.get("ble_rgb_mode") or "static")
+        if mode not in RGB_MODES:
+            mode = "off" if brightness_percent <= 0 else "static"
+
+        handle["ble_rgb_mode"] = mode
+        handle["ble_rgb_color"] = color_hex
+        handle["ble_rgb_brightness"] = int(brightness_percent)
+
+        return {
+            "mode": mode,
+            "brightness": int(brightness_percent),
+            "color": color_hex,
+            "modes_supported": list(RGB_MODES),
+        }
+
+    def set_rgb(
+        self,
+        device: DetectedDevice,
+        *,
+        mode: str,
+        brightness: Optional[int] = None,
+        color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        handle = self._device_handle(device)
+        mode_value = str(mode).strip().lower()
+        if mode_value not in RGB_MODES:
+            raise CapabilityUnsupportedError(
+                f"Unsupported RGB mode '{mode}'. Supported: {', '.join(RGB_MODES)}"
+            )
+        if mode_value not in {"off", "static"}:
+            raise CapabilityUnsupportedError(
+                "BLE RGB hardware write currently supports 'off' and 'static' modes"
+            )
+
+        current: Dict[str, Any] = {}
+        try:
+            current = self.get_rgb(device)
+        except Exception:
+            current = {
+                "mode": "off",
+                "brightness": 100,
+                "color": "00ff00",
+                "modes_supported": list(RGB_MODES),
+            }
+
+        color_hex = self._normalize_color_hex(color) or str(current.get("color") or "00ff00")
+        if brightness is None:
+            brightness_percent = int(current.get("brightness", 100))
+        else:
+            brightness_percent = max(0, min(100, int(brightness)))
+        if mode_value == "off":
+            brightness_percent = 0
+
+        if mode_value == "static":
+            rgb = bytes.fromhex(color_hex)
+            frame_payload = bytes([0x04, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2]])
+            _ = self._vendor_call(
+                device=device,
+                key=KEY_RGB_FRAME_WRITE,
+                value_payload=frame_payload,
+            )
+
+        brightness_u8 = self._rgb_percent_to_u8(brightness_percent)
+        write_keys = self._rgb_brightness_write_keys(handle)
+        last_err: Optional[Exception] = None
+        write_ok = False
+        for key in write_keys:
+            try:
+                _ = self._vendor_call(
+                    device=device,
+                    key=key,
+                    value_payload=bytes([brightness_u8]),
+                )
+                handle["ble_rgb_write_key"] = key.hex()
+                write_ok = True
+                break
+            except Exception as exc:
+                last_err = exc
+                continue
+        if not write_ok:
+            if isinstance(last_err, Exception):
+                raise CapabilityUnsupportedError("Could not write RGB brightness over BLE") from last_err
+            raise CapabilityUnsupportedError("Could not write RGB brightness over BLE")
+
+        handle["ble_rgb_mode"] = mode_value
+        handle["ble_rgb_color"] = color_hex
+        handle["ble_rgb_brightness"] = int(brightness_percent)
+
+        return {
+            "mode": mode_value,
+            "brightness": int(brightness_percent),
+            "color": color_hex,
+            "modes_supported": list(RGB_MODES),
+        }
+
+    def get_button_mapping(self, device: DetectedDevice) -> Dict[str, Any]:
+        mapping: Dict[str, str] = {}
+        for button, slot in BUTTON_SLOT_BY_NAME.items():
+            key = bytes([0x08, 0x84, 0x01, int(slot)])
+            try:
+                result = self._vendor_call(device=device, key=key)
+                payload = self._decode_payload_bytes(result, key=key)
+            except Exception:
+                continue
+            action = self._decode_ble_button_payload(int(slot), payload)
+            if action:
+                mapping[str(button)] = action
+
+        if not mapping:
+            raise CapabilityUnsupportedError("Button mapping read over BLE is not available on this host/device")
+
+        for button, default_action in DEFAULT_BUTTON_MAPPING.items():
+            mapping.setdefault(button, default_action)
+
+        return {
+            "mapping": mapping,
+            "buttons_supported": list(BUTTON_SLOT_BY_NAME.keys()),
+            "actions_suggested": list(BUTTON_ACTIONS),
+        }
+
+    def set_button_mapping(
+        self,
+        device: DetectedDevice,
+        *,
+        button: str,
+        action: str,
+    ) -> Dict[str, Any]:
+        slot = self._slot_from_button_name(button)
+        payload = self._build_ble_button_payload(slot, action)
+        key = bytes([0x08, 0x04, 0x01, slot])
+        _ = self._vendor_call(
+            device=device,
+            key=key,
+            value_payload=payload,
+        )
+
+        try:
+            state = self.get_button_mapping(device)
+            state["mapping"][str(button).strip()] = str(action).strip().lower()
+            return state
+        except CapabilityUnsupportedError:
+            mapping = dict(DEFAULT_BUTTON_MAPPING)
+            mapping[str(button).strip()] = str(action).strip().lower()
+            return {
+                "mapping": mapping,
+                "buttons_supported": list(BUTTON_SLOT_BY_NAME.keys()),
+                "actions_suggested": list(BUTTON_ACTIONS),
+            }
+
+    def reset_button_mapping(self, device: DetectedDevice) -> Dict[str, Any]:
+        for button, action in DEFAULT_BUTTON_MAPPING.items():
+            slot = self._slot_from_button_name(button)
+            payload = self._build_ble_button_payload(slot, action)
+            key = bytes([0x08, 0x04, 0x01, slot])
+            _ = self._vendor_call(
+                device=device,
+                key=key,
+                value_payload=payload,
+            )
+        return {
+            "mapping": dict(DEFAULT_BUTTON_MAPPING),
+            "buttons_supported": list(BUTTON_SLOT_BY_NAME.keys()),
+            "actions_suggested": list(BUTTON_ACTIONS),
+        }
+
+    def list_button_mapping_actions(self, device: DetectedDevice) -> Dict[str, Any]:
+        _ = device
+        return {
+            "buttons": list(BUTTON_SLOT_BY_NAME.keys()),
+            "actions": list(BUTTON_ACTIONS),
+        }
 
 
 __all__ = ["MacOSBleBackend"]

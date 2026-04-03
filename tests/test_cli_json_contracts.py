@@ -27,6 +27,42 @@ class _FakeBackend:
         return self._battery
 
 
+class _FakeHardwareBackend(_FakeBackend):
+    def __init__(self):
+        super().__init__(battery=88)
+        self._rgb = {
+            "mode": "static",
+            "brightness": 65,
+            "color": "112233",
+            "modes_supported": ["off", "static", "breathing", "spectrum"],
+        }
+        self._mapping = {
+            "left_click": "mouse:left",
+            "right_click": "mouse:right",
+            "middle_click": "mouse:middle",
+            "side_1": "mouse:back",
+            "side_2": "mouse:forward",
+            "dpi_cycle": "dpi:cycle",
+        }
+
+    def get_rgb(self, _device):
+        return dict(self._rgb)
+
+    def set_rgb(self, _device, *, mode, brightness=None, color=None):
+        self._rgb["mode"] = str(mode)
+        if brightness is not None:
+            self._rgb["brightness"] = int(brightness)
+        if color is not None:
+            self._rgb["color"] = str(color).lower().lstrip("#")
+        return dict(self._rgb)
+
+    def list_button_mapping_actions(self, _device):
+        return {
+            "buttons": list(self._mapping.keys()),
+            "actions": ["mouse:left", "mouse:right", "mouse:middle", "mouse:back", "mouse:forward", "dpi:cycle"],
+        }
+
+
 class _FakeService:
     def __init__(self, device: DetectedDevice, backend=None):
         self._device = device
@@ -203,6 +239,62 @@ class CliJsonContractTest(unittest.TestCase):
             self.assertEqual(payload["id"], "rawhid:1532:007C")
             self.assertEqual(payload["model"], "deathadder-v2-pro")
             self.assertEqual(payload["button_mapping"]["mapping"]["side_1"], "mouse:back")
+
+    def test_rgb_get_prefers_hardware_state_when_available(self):
+        device = DetectedDevice(
+            identifier="macos-ble:1532:008E:bt:ABC",
+            name="DA V2 Pro",
+            vendor_id=0x1532,
+            product_id=0x008E,
+            backend="macos-ble",
+            model_id="deathadder-v2-pro",
+            capabilities={"dpi", "rgb"},
+        )
+        service = _FakeService(device, backend=_FakeHardwareBackend())
+        args = argparse.Namespace(
+            rgb_command="get",
+            store_file=None,
+            model=None,
+            device=None,
+            json=True,
+        )
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = handle_rgb(service, args)
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["rgb"]["mode"], "static")
+        self.assertEqual(payload["rgb"]["brightness"], 65)
+        self.assertEqual(payload["rgb"]["color"], "112233")
+        self.assertEqual(payload["rgb"]["hardware_apply"], "read")
+
+    def test_button_actions_prefers_hardware_actions_when_available(self):
+        device = DetectedDevice(
+            identifier="macos-ble:1532:008E:bt:ABC",
+            name="DA V2 Pro",
+            vendor_id=0x1532,
+            product_id=0x008E,
+            backend="macos-ble",
+            model_id="deathadder-v2-pro",
+            capabilities={"dpi", "button-mapping"},
+        )
+        service = _FakeService(device, backend=_FakeHardwareBackend())
+        args = argparse.Namespace(
+            button_mapping_command="actions",
+            model=None,
+            device=None,
+            json=True,
+        )
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = handle_button_mapping(service, args)
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertIn("side_1", payload["buttons_supported"])
+        self.assertIn("dpi:cycle", payload["actions_suggested"])
+        self.assertEqual(payload["hardware_apply"], "read")
 
 
 if __name__ == "__main__":

@@ -897,46 +897,12 @@ class MacOSBleBackend(Backend):
 
     def _resolve_target(self, device: DetectedDevice) -> Tuple[Optional[str], str]:
         handle = self._device_handle(device)
-        resolved_uuid = str(handle.get("resolved_bt_address") or "").strip()
-        if resolved_uuid and "-" in resolved_uuid:
-            return resolved_uuid, device.name or DEFAULT_NAME_QUERY
-
         bt_address = str(handle.get("bt_address") or "").strip()
         if self._is_mac_address(bt_address):
-            alias_resolved = self._alias_resolved_uuid(bt_address)
-            if alias_resolved:
-                handle["resolved_bt_address"] = alias_resolved
-                return alias_resolved, device.name or DEFAULT_NAME_QUERY
             return bt_address, device.name or DEFAULT_NAME_QUERY
         if self._is_mac_address(device.serial):
-            alias_resolved = self._alias_resolved_uuid(str(device.serial))
-            if alias_resolved:
-                handle["resolved_bt_address"] = alias_resolved
-                return alias_resolved, device.name or DEFAULT_NAME_QUERY
             return str(device.serial), device.name or DEFAULT_NAME_QUERY
         return None, device.name or device.model_name or DEFAULT_NAME_QUERY
-
-    @staticmethod
-    def _alias_resolved_uuid(mac_address: str) -> Optional[str]:
-        try:
-            from razecli.ble.alias_store import _load_alias_cache
-            from razecli.ble.common import _normalize_address
-        except Exception:
-            return None
-
-        key = _normalize_address(mac_address)
-        if not key:
-            return None
-        aliases = _load_alias_cache()
-        if not isinstance(aliases, dict):
-            return None
-        row = aliases.get(key)
-        if not isinstance(row, dict):
-            return None
-        resolved = str(row.get("resolved_address") or "").strip()
-        if resolved and "-" in resolved:
-            return resolved
-        return None
 
     @staticmethod
     def _vendor_path_from_handle(handle: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -1024,15 +990,8 @@ class MacOSBleBackend(Backend):
                 **kwargs,
             )
 
-        def _remember_runtime_resolution(payload: Dict[str, object]) -> None:
-            resolved = str(payload.get("address") or "").strip()
-            if resolved and "-" in resolved:
-                handle["resolved_bt_address"] = resolved
-
         try:
-            payload = _tx(pinned_path)
-            _remember_runtime_resolution(payload)
-            return payload
+            return _tx(pinned_path)
         except Exception as first_exc:
             if pinned_path is None and not self._missing_vendor_path_error(first_exc):
                 raise
@@ -1047,9 +1006,7 @@ class MacOSBleBackend(Backend):
                 raise first_exc
 
             self._store_vendor_path(handle, discovered)
-            payload = _tx(discovered)
-            _remember_runtime_resolution(payload)
-            return payload
+            return _tx(discovered)
 
     @staticmethod
     def _decode_payload_bytes(result: Dict[str, object], *, key: bytes) -> bytes:

@@ -922,6 +922,10 @@ class TuiActionsMixin:
         except Exception as exc:  # pragma: no cover - runtime/hardware dependent
             _on_error(exc)
 
+    def _edit_dpi_levels(self, stdscr) -> None:
+        """Compatibility entrypoint for TUI `n` binding."""
+        self._set_dpi_profile_count(stdscr)
+
     def _prompt_int(
         self,
         stdscr,

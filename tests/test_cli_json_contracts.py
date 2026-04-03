@@ -450,6 +450,84 @@ class CliJsonContractTest(unittest.TestCase):
         self.assertIn("dpi:cycle", payload["actions_suggested"])
         self.assertEqual(payload["hardware_apply"], "read")
 
+    def test_rgb_menu_starts_tui_with_rgb_editor(self):
+        device = DetectedDevice(
+            identifier="macos-ble:1532:008E:bt:ABC",
+            name="DA V2 Pro",
+            vendor_id=0x1532,
+            product_id=0x008E,
+            backend="macos-ble",
+            model_id="deathadder-v2-pro",
+            capabilities={"dpi", "rgb"},
+        )
+        service = _FakeService(device)
+
+        import razecli.tui as tui_mod
+
+        original_run_tui = tui_mod.run_tui
+        captured: dict[str, object] = {}
+
+        def _fake_run_tui(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        tui_mod.run_tui = _fake_run_tui
+        args = argparse.Namespace(
+            rgb_command="menu",
+            model="deathadder-v2-pro",
+            device=None,
+            all_models=False,
+            all_transports=False,
+            json=False,
+        )
+        try:
+            rc = handle_rgb(service, args)
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured["startup_editor"], "rgb")
+            self.assertEqual(captured["model_filter"], "deathadder-v2-pro")
+            self.assertEqual(captured["collapse_transports"], True)
+        finally:
+            tui_mod.run_tui = original_run_tui
+
+    def test_button_mapping_menu_starts_tui_with_button_editor(self):
+        device = DetectedDevice(
+            identifier="macos-ble:1532:008E:bt:ABC",
+            name="DA V2 Pro",
+            vendor_id=0x1532,
+            product_id=0x008E,
+            backend="macos-ble",
+            model_id="deathadder-v2-pro",
+            capabilities={"dpi", "button-mapping"},
+        )
+        service = _FakeService(device)
+
+        import razecli.tui as tui_mod
+
+        original_run_tui = tui_mod.run_tui
+        captured: dict[str, object] = {}
+
+        def _fake_run_tui(**kwargs):
+            captured.update(kwargs)
+            return 0
+
+        tui_mod.run_tui = _fake_run_tui
+        args = argparse.Namespace(
+            button_mapping_command="menu",
+            model="deathadder-v2-pro",
+            device=None,
+            all_models=False,
+            all_transports=False,
+            json=False,
+        )
+        try:
+            rc = handle_button_mapping(service, args)
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured["startup_editor"], "button-mapping")
+            self.assertEqual(captured["model_filter"], "deathadder-v2-pro")
+            self.assertEqual(captured["collapse_transports"], True)
+        finally:
+            tui_mod.run_tui = original_run_tui
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -169,6 +169,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT != '' && secrets.RELEASE_PAT || github.token }}
 
       - name: Setup Python
         uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55
@@ -213,17 +214,21 @@ jobs:
 
       - name: Create and push tag
         shell: bash
+        env:
+          PUSH_TOKEN: ${{ secrets.RELEASE_PAT != '' && secrets.RELEASE_PAT || github.token }}
         run: |
           set -euo pipefail
           tag="${{ needs.derive-version.outputs.next }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
           git tag -a "${tag}" -m "Release ${tag}"
           git push origin "${tag}"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
         with:
+          token: ${{ secrets.RELEASE_PAT != '' && secrets.RELEASE_PAT || github.token }}
           tag_name: ${{ needs.derive-version.outputs.next }}
           name: ${{ needs.derive-version.outputs.next }}
           files: |

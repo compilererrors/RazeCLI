@@ -140,10 +140,17 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55
         with:
-          python-version: "3.11"
+          python-version: "3.9"
 
       - name: Create virtualenv
         run: python -m venv .venv
+
+      - name: Show build Python versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python --version
+          .venv/bin/python --version
 
       - name: Build macOS onefile binary
         run: ./scripts/build_macos_onefile.sh

@@ -11,13 +11,13 @@ if [[ ! -x ".venv/bin/python" ]]; then
   echo "Missing .venv. Create it first:"
   echo "  python3 -m venv .venv"
   echo "  .venv/bin/python -m pip install -U pip"
-  echo "  .venv/bin/python -m pip install -e \".[detect,bundle]\""
+  echo "  .venv/bin/python -m pip install -e \".[detect,ble,bundle]\""
   exit 1
 fi
 
 PYTHON=".venv/bin/python"
 
-"$PYTHON" -m pip install -e ".[detect,bundle]"
+"$PYTHON" -m pip install -e ".[detect,ble,bundle]"
 
 # PYTHONPYCACHEPREFIX avoids macOS cache permission problems in some environments.
 PYTHONPYCACHEPREFIX=/tmp/razecli-pyc "$PYTHON" -m PyInstaller \

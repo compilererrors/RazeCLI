@@ -4,6 +4,8 @@ import os
 import razecli.backends.macos_ble_backend as macos_ble_backend_mod
 import razecli.ble_probe as ble_probe_mod
 from razecli.backends.macos_ble_backend import (
+    KEY_RGB_FRAME_READ,
+    KEY_RGB_FRAME_WRITE,
     KEY_BATTERY_RAW_READ,
     KEY_BATTERY_STATUS_READ,
     KEY_DPI_STAGES_READ,
@@ -67,6 +69,9 @@ class _FakeVendorCall:
     def __init__(self):
         self.calls = []
         self.poll_code = 0x01
+        self.rgb_brightness = 0x80
+        self.rgb_color = (0x00, 0xFF, 0x00)
+        self.button_payloads = {}
 
     def __call__(
         self,
@@ -118,6 +123,33 @@ class _FakeVendorCall:
             if payload:
                 self.poll_code = int(payload[0])
             return {"vendor_decode": {"payload_hex": ""}}
+        if key_bytes in (bytes.fromhex("10850101"), bytes.fromhex("10850100")):
+            return {"vendor_decode": {"payload_hex": f"{self.rgb_brightness:02x}"}}
+        if key_bytes in (bytes.fromhex("10050100"), bytes.fromhex("10050101")):
+            payload = bytes(value_payload or b"")
+            if payload:
+                self.rgb_brightness = int(payload[0])
+            return {"vendor_decode": {"payload_hex": ""}}
+        if key_bytes == KEY_RGB_FRAME_READ:
+            r, g, b = self.rgb_color
+            payload_hex = f"0400000000{r:02x}{g:02x}{b:02x}"
+            return {"vendor_decode": {"payload_hex": payload_hex}}
+        if key_bytes == KEY_RGB_FRAME_WRITE:
+            payload = bytes(value_payload or b"")
+            if len(payload) >= 8:
+                self.rgb_color = (int(payload[5]), int(payload[6]), int(payload[7]))
+            return {"vendor_decode": {"payload_hex": ""}}
+        if len(key_bytes) == 4 and key_bytes[:3] == bytes.fromhex("080401"):
+            slot = int(key_bytes[3])
+            self.button_payloads[slot] = bytes(value_payload or b"")
+            return {"vendor_decode": {"payload_hex": ""}}
+        if len(key_bytes) == 4 and key_bytes[:3] == bytes.fromhex("088401"):
+            slot = int(key_bytes[3])
+            payload = self.button_payloads.get(
+                slot,
+                bytes([0x01, slot, 0x00, 0x01, 0x01, slot, 0x00, 0x00, 0x00, 0x00]),
+            )
+            return {"vendor_decode": {"payload_hex": payload.hex()}}
         raise AssertionError(f"unexpected key {key_bytes.hex()}")
 
 
@@ -165,7 +197,7 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.assertIn("dpi", device.capabilities)
         self.assertIn("dpi-stages", device.capabilities)
         self.assertIn("battery", device.capabilities)
-        self.assertNotIn("poll-rate", device.capabilities)
+        self.assertIn("poll-rate", device.capabilities)
 
     def test_get_dpi_and_set_dpi_uses_vendor_stage_table(self):
         device = self.backend.detect()[0]
@@ -323,6 +355,17 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.backend.set_poll_rate(device, 500)
         self.assertEqual(self.backend.get_poll_rate(device), 500)
 
+    def test_decode_poll_rate_prefixed_payload(self):
+        payload = bytes([0x01, 0x02])
+        self.assertEqual(self.backend._decode_poll_rate_payload(payload), 500)
+
+    def test_poll_rate_uses_cached_value_when_read_temporarily_fails(self):
+        os.environ["RAZECLI_BLE_POLL_READ_KEYS"] = "deadbeef"
+        device = self.backend.detect()[0]
+        if isinstance(device.backend_handle, dict):
+            device.backend_handle["ble_poll_rate_hz"] = 1000
+        self.assertEqual(self.backend.get_poll_rate(device), 1000)
+
     def test_vendor_call_falls_back_to_discovered_gatt_path(self):
         device = self.backend.detect()[0]
 
@@ -369,6 +412,41 @@ class MacOSBleBackendTest(unittest.TestCase):
             device.backend_handle.get("ble_service_uuid"),
             "99999999-9999-9999-9999-999999999999",
         )
+
+    def test_rgb_get_and_set_roundtrip(self):
+        device = self.backend.detect()[0]
+
+        before = self.backend.get_rgb(device)
+        self.assertEqual(before["mode"], "static")
+        self.assertEqual(before["color"], "00ff00")
+        self.assertEqual(before["brightness"], 50)
+
+        after = self.backend.set_rgb(
+            device,
+            mode="static",
+            brightness=55,
+            color="#11aa22",
+        )
+        self.assertEqual(after["mode"], "static")
+        self.assertEqual(after["brightness"], 55)
+        self.assertEqual(after["color"], "11aa22")
+
+        current = self.backend.get_rgb(device)
+        self.assertEqual(current["color"], "11aa22")
+        self.assertEqual(current["brightness"], 55)
+
+    def test_button_mapping_set_and_get_roundtrip(self):
+        device = self.backend.detect()[0]
+        state = self.backend.set_button_mapping(
+            device,
+            button="side_1",
+            action="mouse:back",
+        )
+        self.assertEqual(state["mapping"]["side_1"], "mouse:back")
+
+        current = self.backend.get_button_mapping(device)
+        self.assertEqual(current["mapping"]["side_1"], "mouse:back")
+        self.assertIn("left_click", current["mapping"])
 
 
 if __name__ == "__main__":

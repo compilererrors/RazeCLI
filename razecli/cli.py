@@ -198,14 +198,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     rgb_parser = subparsers.add_parser(
         "rgb",
-        help="Local RGB scaffold (command contract for upcoming hardware support)",
+        help="RGB control (hardware when supported, local fallback otherwise)",
     )
     rgb_sub = rgb_parser.add_subparsers(dest="rgb_command", required=True)
-    rgb_get = rgb_sub.add_parser("get", help="Read local RGB scaffold state")
+    rgb_get = rgb_sub.add_parser("get", help="Read RGB state (hardware-first, then local fallback)")
     _add_feature_store_file_arg(rgb_get)
     _add_target_args(rgb_get)
 
-    rgb_set = rgb_sub.add_parser("set", help="Update local RGB scaffold state")
+    rgb_set = rgb_sub.add_parser("set", help="Set RGB state (hardware-first, then local fallback)")
     rgb_set.add_argument(
         "--mode",
         required=True,
@@ -226,24 +226,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     button_mapping_parser = subparsers.add_parser(
         "button-mapping",
-        help="Local button-mapping scaffold (ready for future hardware binding)",
+        help="Button mapping (hardware when supported, local fallback otherwise)",
     )
     button_mapping_sub = button_mapping_parser.add_subparsers(
         dest="button_mapping_command",
         required=True,
     )
 
-    button_get = button_mapping_sub.add_parser("get", help="Read local button-mapping scaffold state")
+    button_get = button_mapping_sub.add_parser(
+        "get",
+        help="Read button mapping (hardware-first, then local fallback)",
+    )
     _add_feature_store_file_arg(button_get)
     _add_target_args(button_get)
 
-    button_set = button_mapping_sub.add_parser("set", help="Set one local button mapping")
+    button_set = button_mapping_sub.add_parser(
+        "set",
+        help="Set one button mapping (hardware-first, then local fallback)",
+    )
     button_set.add_argument("--button", required=True, help="Button key, for example side_1")
     button_set.add_argument("--action", required=True, help="Action key, for example mouse:back")
     _add_feature_store_file_arg(button_set)
     _add_target_args(button_set)
 
-    button_reset = button_mapping_sub.add_parser("reset", help="Reset local button mapping to defaults")
+    button_reset = button_mapping_sub.add_parser(
+        "reset",
+        help="Reset button mapping to defaults (hardware-first, then local fallback)",
+    )
     _add_feature_store_file_arg(button_reset)
     _add_target_args(button_reset)
 

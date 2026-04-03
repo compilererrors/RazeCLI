@@ -197,26 +197,54 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             return False
         if self._pending_discovery and not self._discovery_in_progress:
             self._pending_discovery = False
-            self._refresh_devices(eager_state=False)
-            if self.devices:
-                self._queue_state_refresh(force=True)
+
+            def _on_discovery_success(_result: Any) -> None:
+                if self.devices:
+                    self._queue_state_refresh(force=True)
+
+            def _on_discovery_error(exc: Exception) -> None:
+                self._set_status(f"Device refresh failed: {exc}", hold_seconds=8.0)
+
+            started = self._start_background_job(
+                label="Refreshing devices",
+                work=lambda: self._refresh_devices(eager_state=False),
+                on_success=_on_discovery_success,
+                on_error=_on_discovery_error,
+            )
+            if not started:
+                self._pending_discovery = True
+                return False
             return True
 
         if self._pending_state_refresh:
             force = bool(self._pending_state_force)
             self._pending_state_refresh = False
             self._pending_state_force = False
-            self._refresh_state(force=force)
+
+            def _on_state_error(exc: Exception) -> None:
+                self._set_status(f"State refresh failed: {exc}", hold_seconds=8.0)
+
+            started = self._start_background_job(
+                label="Refreshing device state",
+                work=lambda: self._refresh_state(force=force),
+                on_error=_on_state_error,
+            )
+            if not started:
+                self._pending_state_refresh = True
+                self._pending_state_force = self._pending_state_force or force
+                return False
             return True
 
         return False
 
     def _apply_tui_ble_defaults(self) -> None:
         tuned_defaults = {
-            "RAZECLI_BLE_BACKEND_TIMEOUT": "3.5",
-            "RAZECLI_BLE_BACKEND_RESPONSE_TIMEOUT": "0.8",
-            "RAZECLI_BLE_DPI_READ_ATTEMPTS": "2",
-            "RAZECLI_BLE_DPI_READ_RETRY_DELAY": "0.05",
+            "RAZECLI_BLE_BACKEND_TIMEOUT": "2.4",
+            "RAZECLI_BLE_BACKEND_RESPONSE_TIMEOUT": "0.55",
+            "RAZECLI_BLE_DPI_READ_ATTEMPTS": "1",
+            "RAZECLI_BLE_DPI_READ_RETRY_DELAY": "0.02",
+            "RAZECLI_BLE_POLL_READ_ATTEMPTS": "1",
+            "RAZECLI_BLE_POLL_READ_RETRY_DELAY": "0.0",
         }
         for key, value in tuned_defaults.items():
             if os.getenv(key):
@@ -270,6 +298,35 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             self.selected_index = len(self.devices) - 1
         return self.devices[self.selected_index]
 
+    def _has_pending_activity(self) -> bool:
+        return bool(
+            self._job_label
+            or self._pending_discovery
+            or self._discovery_in_progress
+            or self._pending_state_refresh
+            or self._state_loading_device_id
+        )
+
+    @staticmethod
+    def _hard_exit(stdscr) -> None:
+        try:
+            curses.nocbreak()
+        except Exception:
+            pass
+        try:
+            stdscr.keypad(False)
+        except Exception:
+            pass
+        try:
+            curses.echo()
+        except Exception:
+            pass
+        try:
+            curses.endwin()
+        except Exception:
+            pass
+        os._exit(0)
+
     def run(self, stdscr) -> int:
         try:
             curses.set_escdelay(25)
@@ -277,13 +334,14 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             pass
         curses.curs_set(0)
         stdscr.keypad(True)
-        stdscr.timeout(60)
+        stdscr.timeout(40)
         self._init_theme()
 
         self._apply_tui_ble_defaults()
 
         try:
             self._queue_discovery()
+            self._run_pending_io()
 
             while True:
                 self._drain_background_job_results()
@@ -303,7 +361,11 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                         self._queue_state_refresh(force=False)
                     continue
 
-                if key in (ord("q"), 27):
+                if key == ord("q"):
+                    if self._has_pending_activity():
+                        self._hard_exit(stdscr)
+                    return 0
+                if key == 27:
                     return 0
                 if self._job_label and key not in (
                     curses.KEY_UP,

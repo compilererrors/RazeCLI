@@ -22,6 +22,23 @@ class TuiViewMixin:
         frames = "|/-\\"
         return frames[int(time.monotonic() * 8.0) % len(frames)]
 
+    @staticmethod
+    def _loading_dots() -> str:
+        return "." * (1 + (int(time.monotonic() * 3.0) % 3))
+
+    def _busy_label(self) -> str:
+        job_label = str(getattr(self, "_job_label", "") or "").strip()
+        if job_label:
+            return job_label
+        if getattr(self, "_pending_discovery", False) or getattr(self, "_discovery_in_progress", False):
+            return "Refreshing devices"
+        if getattr(self, "_pending_state_refresh", False) or getattr(self, "_state_loading_device_id", None):
+            return "Refreshing device state"
+        return ""
+
+    def _is_busy(self) -> bool:
+        return bool(self._busy_label())
+
     def _status_attr(self) -> int:
         text = str(getattr(self, "status", "")).lower()
         if any(token in text for token in ("error", "failed", "invalid", "could not", "unavailable")):
@@ -262,7 +279,7 @@ class TuiViewMixin:
         if loading_selected:
             lines.extend(
                 [
-                    f"State: loading {self._spinner()}",
+                    f"State: loading{self._loading_dots()}",
                     "",
                 ]
             )
@@ -280,9 +297,13 @@ class TuiViewMixin:
             dpi_profile_text = f"{self.state.dpi_active_stage}/{len(self.state.dpi_stages)}"
         if bt_008e and (self.state.dpi_active_stage is None or not self.state.dpi_stages):
             dpi_profile_text = "N/A (BT limited)"
+        poll_supported = "poll-rate" in selected.capabilities
         poll_text = "-" if self.state.poll_rate is None else f"{self.state.poll_rate} Hz"
-        if bt_008e and self.state.poll_rate is None:
-            poll_text = "N/A (BT limited)"
+        if self.state.poll_rate is None:
+            if bt_008e and not poll_supported:
+                poll_text = "N/A (BT limited)"
+            elif poll_supported and not loading_selected:
+                poll_text = "Unavailable (read failed; see Status)"
         battery_text = "-" if self.state.battery is None else f"{self.state.battery}%"
         if bt_008e and self.state.battery is None:
             battery_text = "N/A (BT limited)"
@@ -374,12 +395,9 @@ class TuiViewMixin:
         else:
             header += " | model filter: all"
         loading_hint = ""
-        if getattr(self, "_pending_discovery", False) or getattr(self, "_discovery_in_progress", False):
-            loading_hint = f" | discovering {self._spinner()}"
-        elif getattr(self, "_job_label", None):
-            loading_hint = f" | {str(getattr(self, '_job_label')).lower()} {self._spinner()}"
-        elif getattr(self, "_pending_state_refresh", False) or getattr(self, "_state_loading_device_id", None):
-            loading_hint = f" | syncing {self._spinner()}"
+        busy_label = self._busy_label()
+        if busy_label:
+            loading_hint = f" | {busy_label.lower()}"
         self._safe_add(
             stdscr,
             0,
@@ -390,7 +408,7 @@ class TuiViewMixin:
 
         devices_title = f"Devices ({len(self.devices)})"
         if getattr(self, "_pending_discovery", False) or getattr(self, "_discovery_in_progress", False):
-            devices_title += f" - loading {self._spinner()}"
+            devices_title += " - loading..."
         self._draw_panel_box(
             stdscr,
             top=content_top,
@@ -421,7 +439,7 @@ class TuiViewMixin:
             )
         else:
             if getattr(self, "_pending_discovery", False) or getattr(self, "_discovery_in_progress", False):
-                self._safe_add(stdscr, list_start_y, left_x + 2, f"Loading devices... {self._spinner()}")
+                self._safe_add(stdscr, list_start_y, left_x + 2, "Loading devices...")
             else:
                 self._safe_add(stdscr, list_start_y, left_x + 2, "No devices")
 
@@ -446,7 +464,8 @@ class TuiViewMixin:
         self._safe_add(stdscr, height - 3, pad_x, actions_primary, self._ui_attr("footer", curses.A_BOLD))
         self._safe_add(stdscr, height - 2, pad_x, actions_secondary, self._ui_attr("footer", curses.A_BOLD))
         status_text = str(self.status)
-        if getattr(self, "_job_label", None):
-            status_text = f"{self._spinner()} {status_text}"
+        busy_label = self._busy_label()
+        if busy_label:
+            status_text = f"{self._spinner()} {busy_label} | {status_text}"
         self._safe_add(stdscr, height - 1, pad_x, f"Status: {status_text}", self._status_attr())
         stdscr.refresh()

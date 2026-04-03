@@ -1,7 +1,7 @@
 """Backend abstractions."""
 
 from abc import ABC, abstractmethod
-from typing import List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from razecli.errors import CapabilityUnsupportedError
 from razecli.types import DetectedDevice
@@ -37,3 +37,34 @@ class Backend(ABC):
 
     def get_battery(self, device: DetectedDevice) -> int:
         raise CapabilityUnsupportedError(f"{self.name} backend does not support battery reads")
+
+    def get_rgb(self, device: DetectedDevice) -> Dict[str, Any]:
+        raise CapabilityUnsupportedError(f"{self.name} backend does not support RGB reads")
+
+    def set_rgb(
+        self,
+        device: DetectedDevice,
+        *,
+        mode: str,
+        brightness: Optional[int] = None,
+        color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raise CapabilityUnsupportedError(f"{self.name} backend does not support RGB writes")
+
+    def get_button_mapping(self, device: DetectedDevice) -> Dict[str, Any]:
+        raise CapabilityUnsupportedError(f"{self.name} backend does not support button-mapping reads")
+
+    def set_button_mapping(
+        self,
+        device: DetectedDevice,
+        *,
+        button: str,
+        action: str,
+    ) -> Dict[str, Any]:
+        raise CapabilityUnsupportedError(f"{self.name} backend does not support button-mapping writes")
+
+    def reset_button_mapping(self, device: DetectedDevice) -> Dict[str, Any]:
+        raise CapabilityUnsupportedError(f"{self.name} backend does not support button-mapping reset")
+
+    def list_button_mapping_actions(self, device: DetectedDevice) -> Dict[str, Any]:
+        raise CapabilityUnsupportedError(f"{self.name} backend does not support button-mapping action listing")

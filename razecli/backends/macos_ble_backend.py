@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -16,6 +17,7 @@ from razecli.backends.base import Backend
 from razecli.backends.macos_profiler_backend import MacOSProfilerBackend
 from razecli.backends.rawhid_backend import RawHidBackend
 from razecli.errors import BackendUnavailableError, CapabilityUnsupportedError
+from razecli.model_registry import ModelRegistry
 from razecli.types import DetectedDevice
 
 RAZER_VENDOR_ID = 0x1532
@@ -30,6 +32,9 @@ DEFAULT_DPI_READ_KEYS = ("0b840100", "0b840000")
 DEFAULT_DPI_WRITE_KEYS = ("0b040100", "0b040000")
 DEFAULT_POLL_READ_KEYS = ("00850001", "00850000", "00850100", "0b850100", "0b850000")
 DEFAULT_POLL_WRITE_KEYS = ("00050001", "00050000", "00050100", "0b050100", "0b050000")
+# Model-level BLE poll-rate allowlist.
+# Keep empty by default; add slugs only after verified hardware support.
+DEFAULT_BLE_POLL_SUPPORTED_MODELS: Tuple[str, ...] = ()
 DEFAULT_RGB_BRIGHTNESS_READ_KEYS = ("10850101", "10850100")
 DEFAULT_RGB_BRIGHTNESS_WRITE_KEYS = ("10050100", "10050101")
 KEY_RGB_FRAME_READ = bytes.fromhex("10840000")
@@ -85,7 +90,10 @@ class MacOSBleBackend(Backend):
         self.last_error = None
         self._supported = platform.system() == "Darwin"
         self._ble_product_ids = self._load_product_ids()
-        self._poll_capability_enabled = self._env_flag("RAZECLI_BLE_POLL_CAP", default=True)
+        self._model_registry = ModelRegistry.load()
+        self._poll_capability_enabled = self._env_flag("RAZECLI_BLE_POLL_CAP", default=False)
+        self._ble_poll_supported_models = self._load_ble_poll_supported_models()
+        self._poll_unavailable_targets: Set[str] = set()
         self._rawhid = RawHidBackend()
         self._profiler = MacOSProfilerBackend()
         if not self._supported:
@@ -152,11 +160,64 @@ class MacOSBleBackend(Backend):
             return set(from_env)
         return set(DEFAULT_BLE_PRODUCT_IDS)
 
-    def _detect_capabilities(self) -> Set[str]:
+    @staticmethod
+    def _load_ble_poll_supported_models() -> Set[str]:
+        raw = str(os.getenv("RAZECLI_BLE_POLL_SUPPORTED_MODELS", "")).strip()
+        if not raw:
+            return set(DEFAULT_BLE_POLL_SUPPORTED_MODELS)
+        values: Set[str] = set()
+        for token in raw.split(","):
+            slug = str(token).strip().lower()
+            if slug:
+                values.add(slug)
+        return values
+
+    def _model_supports_ble_poll(self, model_id: Optional[str]) -> bool:
+        if self._env_flag("RAZECLI_BLE_POLL_FORCE", default=False):
+            return True
+        slug = str(model_id or "").strip().lower()
+        if not slug:
+            return False
+        if slug in self._ble_poll_supported_models:
+            return True
+        model = self._model_registry.get(slug)
+        return bool(model and model.ble_poll_rate_supported)
+
+    def _detect_capabilities(
+        self,
+        *,
+        handle: Optional[Dict[str, object]] = None,
+        target_key: Optional[str] = None,
+        model_id: Optional[str] = None,
+    ) -> Set[str]:
         caps = set(BLE_CAPABILITIES)
-        if self._poll_capability_enabled:
+        blocked_by_handle = bool((handle or {}).get("ble_poll_unavailable", False))
+        blocked_by_target = bool(target_key and target_key in self._poll_unavailable_targets)
+        if (
+            self._poll_capability_enabled
+            and self._model_supports_ble_poll(model_id)
+            and not blocked_by_handle
+            and not blocked_by_target
+        ):
             caps.add("poll-rate")
         return caps
+
+    @staticmethod
+    def _poll_debug_enabled() -> bool:
+        raw = str(os.getenv("RAZECLI_BLE_POLL_DEBUG", "")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _poll_debug(self, message: str) -> None:
+        if self._poll_debug_enabled():
+            print(f"[macos-ble poll] {message}", file=sys.stderr)
+
+    @staticmethod
+    def _poll_target_key_from_parts(*, bt_address: Optional[str], serial: Optional[str], identifier: str) -> str:
+        if bt_address and MacOSBleBackend._is_mac_address(bt_address):
+            return str(bt_address).upper()
+        if serial and MacOSBleBackend._is_mac_address(serial):
+            return str(serial).upper()
+        return str(identifier)
 
     @staticmethod
     def _is_mac_address(value: Optional[str]) -> bool:
@@ -550,11 +611,11 @@ class MacOSBleBackend(Backend):
 
     @staticmethod
     def _poll_read_attempts() -> int:
-        raw = str(os.getenv("RAZECLI_BLE_POLL_READ_ATTEMPTS", "3")).strip()
+        raw = str(os.getenv("RAZECLI_BLE_POLL_READ_ATTEMPTS", "1")).strip()
         try:
             value = int(raw)
         except ValueError:
-            value = 3
+            value = 1
         return max(1, min(8, value))
 
     @staticmethod
@@ -577,6 +638,11 @@ class MacOSBleBackend(Backend):
             bt_address = self._match_profiler_address(device, profiler_rows)
             if bt_address:
                 handle["bt_address"] = bt_address
+            target_key = self._poll_target_key_from_parts(
+                bt_address=bt_address,
+                serial=device.serial,
+                identifier=device.identifier,
+            )
 
             devices.append(
                 DetectedDevice(
@@ -593,7 +659,11 @@ class MacOSBleBackend(Backend):
                     serial=bt_address or device.serial,
                     model_id=device.model_id,
                     model_name=device.model_name,
-                    capabilities=self._detect_capabilities(),
+                    capabilities=self._detect_capabilities(
+                        handle=handle,
+                        target_key=target_key,
+                        model_id=device.model_id,
+                    ),
                     backend_handle=handle,
                 )
             )
@@ -607,6 +677,11 @@ class MacOSBleBackend(Backend):
             handle["backend"] = self.name
             if bt_address:
                 handle["bt_address"] = bt_address
+            target_key = self._poll_target_key_from_parts(
+                bt_address=bt_address,
+                serial=row.serial,
+                identifier=row.identifier,
+            )
 
             devices.append(
                 DetectedDevice(
@@ -623,7 +698,11 @@ class MacOSBleBackend(Backend):
                     serial=bt_address or row.serial,
                     model_id=row.model_id,
                     model_name=row.model_name,
-                    capabilities=self._detect_capabilities(),
+                    capabilities=self._detect_capabilities(
+                        handle=handle,
+                        target_key=target_key,
+                        model_id=row.model_id,
+                    ),
                     backend_handle=handle,
                 )
             )
@@ -645,6 +724,21 @@ class MacOSBleBackend(Backend):
         handle: Dict[str, object] = {}
         device.backend_handle = handle
         return handle
+
+    def _poll_target_key(self, device: DetectedDevice) -> str:
+        handle = self._device_handle(device)
+        bt_address = str(handle.get("bt_address") or "").strip()
+        return self._poll_target_key_from_parts(
+            bt_address=bt_address,
+            serial=device.serial,
+            identifier=device.identifier,
+        )
+
+    @staticmethod
+    def _poll_diagnostic_preview(rows: Sequence[str], *, limit: int = 10) -> str:
+        if not rows:
+            return "-"
+        return ", ".join(str(item) for item in rows[-max(1, int(limit)) :])
 
     def _resolve_target(self, device: DetectedDevice) -> Tuple[Optional[str], str]:
         handle = self._device_handle(device)
@@ -1233,23 +1327,74 @@ class MacOSBleBackend(Backend):
         handle["ble_cached_active_stage"] = int(active_stage)
 
     def get_poll_rate(self, device: DetectedDevice) -> int:
+        if not self._poll_capability_enabled:
+            raise CapabilityUnsupportedError(
+                "Bluetooth poll-rate probing is disabled by default. "
+                "Set RAZECLI_BLE_POLL_CAP=1 to enable experimental probing."
+            )
+        if not self._model_supports_ble_poll(device.model_id):
+            device.capabilities.discard("poll-rate")
+            raise CapabilityUnsupportedError(
+                f"Poll-rate over Bluetooth is disabled for model '{device.model_id or 'unknown'}'. "
+                "Use USB/2.4 for poll-rate. "
+                "To test a model anyway, add it to RAZECLI_BLE_POLL_SUPPORTED_MODELS "
+                "or set RAZECLI_BLE_POLL_FORCE=1."
+            )
         handle = self._device_handle(device)
+        target_key = self._poll_target_key(device)
+        if bool(handle.get("ble_poll_unavailable", False)) or target_key in self._poll_unavailable_targets:
+            device.capabilities.discard("poll-rate")
+            cached = handle.get("ble_poll_rate_hz")
+            try:
+                cached_hz = int(cached) if cached is not None else None
+            except Exception:
+                cached_hz = None
+            if cached_hz in (125, 500, 1000):
+                return int(cached_hz)
+            raise CapabilityUnsupportedError(
+                "Poll-rate is not exposed by this Bluetooth endpoint on this host. Use USB/2.4 for poll-rate."
+            )
         read_keys = self._poll_read_keys(handle)
-        attempted: List[str] = []
+        diagnostics: List[str] = []
         read_attempts = self._poll_read_attempts()
         retry_delay = self._poll_read_retry_delay()
+        explicit_rejects = 0
+        observed_vendor_replies = 0
         for _ in range(read_attempts):
             for key in read_keys:
-                attempted.append(key.hex())
+                status_code: Optional[int] = None
                 try:
                     result = self._vendor_call(device=device, key=key)
+                    if isinstance(result, dict):
+                        vendor_decode = result.get("vendor_decode")
+                        if isinstance(vendor_decode, dict):
+                            status_code_raw = vendor_decode.get("status_code")
+                            try:
+                                status_code = int(status_code_raw)
+                            except Exception:
+                                status_code = None
+                            if status_code is not None:
+                                observed_vendor_replies += 1
+                                if status_code == 3:
+                                    explicit_rejects += 1
                     payload = self._decode_payload_bytes(result, key=key)
-                except Exception:
+                    decoded = self._decode_poll_rate_payload(payload)
+                    preview = payload[:16].hex() if payload else "-"
+                    diagnostics.append(
+                        f"{key.hex()}:sc={status_code if status_code is not None else '-'}"
+                        f":len={len(payload)}:hex={preview}:hz={decoded if decoded is not None else '-'}"
+                    )
+                    self._poll_debug(diagnostics[-1])
+                except Exception as exc:
+                    diagnostics.append(f"{key.hex()}:err={exc}")
+                    self._poll_debug(diagnostics[-1])
                     continue
-                decoded = self._decode_poll_rate_payload(payload)
                 if decoded is not None:
                     handle["ble_poll_read_key"] = key.hex()
                     handle["ble_poll_rate_hz"] = int(decoded)
+                    handle["ble_poll_unavailable"] = False
+                    self._poll_unavailable_targets.discard(target_key)
+                    device.capabilities.add("poll-rate")
                     return int(decoded)
             if retry_delay > 0:
                 time.sleep(retry_delay)
@@ -1261,15 +1406,34 @@ class MacOSBleBackend(Backend):
             cached_hz = None
         if cached_hz in (125, 500, 1000):
             return int(cached_hz)
+
+        if observed_vendor_replies > 0 and explicit_rejects == observed_vendor_replies:
+            handle["ble_poll_unavailable"] = True
+            self._poll_unavailable_targets.add(target_key)
+            device.capabilities.discard("poll-rate")
+            preview = self._poll_diagnostic_preview(diagnostics)
+            raise CapabilityUnsupportedError(
+                "Poll-rate is not exposed by this Bluetooth endpoint on this host. "
+                f"Recent probe attempts: {preview}. Use USB/2.4 for poll-rate."
+            )
+        preview = self._poll_diagnostic_preview(diagnostics)
         raise CapabilityUnsupportedError(
             "Poll-rate over Bluetooth is not mapped for this device/host. "
-            f"Tried read keys: {attempted}"
+            f"Recent probe attempts: {preview}"
         )
 
     def set_poll_rate(self, device: DetectedDevice, hz: int) -> None:
         hz = int(hz)
         if hz not in POLL_RATE_TO_CODE:
             raise CapabilityUnsupportedError("Poll-rate must be one of: 125, 500, 1000")
+        if not self._model_supports_ble_poll(device.model_id):
+            device.capabilities.discard("poll-rate")
+            raise CapabilityUnsupportedError(
+                f"Poll-rate over Bluetooth is disabled for model '{device.model_id or 'unknown'}'. "
+                "Use USB/2.4 for poll-rate. "
+                "To test a model anyway, add it to RAZECLI_BLE_POLL_SUPPORTED_MODELS "
+                "or set RAZECLI_BLE_POLL_FORCE=1."
+            )
 
         handle = self._device_handle(device)
         write_keys = self._poll_write_keys(handle)
@@ -1290,6 +1454,9 @@ class MacOSBleBackend(Backend):
                 if int(current) == hz:
                     handle["ble_poll_write_key"] = key.hex()
                     handle["ble_poll_rate_hz"] = int(hz)
+                    handle["ble_poll_unavailable"] = False
+                    self._poll_unavailable_targets.discard(self._poll_target_key(device))
+                    device.capabilities.add("poll-rate")
                     return
 
         raise CapabilityUnsupportedError(
@@ -1298,7 +1465,12 @@ class MacOSBleBackend(Backend):
         )
 
     def get_supported_poll_rates(self, device: DetectedDevice) -> Sequence[int]:
-        _ = device
+        model = self._model_registry.get(str(device.model_id or "").strip().lower())
+        if model is not None:
+            if model.ble_supported_poll_rates:
+                return sorted(set(int(value) for value in model.ble_supported_poll_rates))
+            if model.supported_poll_rates:
+                return sorted(set(int(value) for value in model.supported_poll_rates))
         return [125, 500, 1000]
 
     async def _read_standard_battery_level_async(

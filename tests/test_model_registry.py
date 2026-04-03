@@ -17,6 +17,8 @@ class ModelRegistryTest(unittest.TestCase):
         self.assertIn((0x1532, 0x007D), model.usb_ids)
         self.assertIn((0x1532, 0x008E), model.usb_ids)
         self.assertEqual(model.dpi_max, 20000)
+        self.assertFalse(model.ble_poll_rate_supported)
+        self.assertEqual(tuple(model.ble_supported_poll_rates), ())
 
     def test_find_by_usb(self):
         registry = ModelRegistry.load()

@@ -123,6 +123,28 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.response_timeout, 2.0)
         self.assertTrue(args.no_response)
 
+    def test_ble_poll_probe_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "poll-probe",
+                "--address",
+                "02:11:22:33:44:55",
+                "--attempts",
+                "2",
+                "--key",
+                "00850001",
+                "--key",
+                "0b850100",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "poll-probe")
+        self.assertEqual(args.address, "02:11:22:33:44:55")
+        self.assertEqual(args.attempts, 2)
+        self.assertEqual(args.key, ["00850001", "0b850100"])
+
     def test_ble_alias_list_parse(self):
         parser = build_parser()
         args = parser.parse_args(["ble", "alias", "list"])

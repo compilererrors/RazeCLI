@@ -17,10 +17,15 @@ Supported models:
 ## Current Status
 
 - USB mode (`007C`) and 2.4G dongle mode (`007D`) are the most stable paths.
+- Poll-rate over USB/dongle is available via `rawhid` on supported models.
 - Bluetooth endpoint (`008E`) is handled by a dedicated macOS GATT backend: `macos-ble`.
 - Bluetooth support is still experimental on macOS and connect/discovery can fail on some hosts.
-- Poll-rate over Bluetooth has experimental support in `macos-ble` and is enabled by default.
-- Set `RAZECLI_BLE_POLL_CAP=0` to hide/disable BT poll-rate capability when debugging unstable hosts.
+- Poll-rate over Bluetooth is model-gated in `macos-ble`.
+- Model config is the primary switch (`ble_poll_rate_supported` / `ble_supported_poll_rates` in `razecli/models/*.py`).
+- For `deathadder-v2-pro`, poll-rate is treated as USB/2.4-only on BLE.
+- Runtime probing is still off by default; set `RAZECLI_BLE_POLL_CAP=1`.
+- Optional runtime allowlist override: `RAZECLI_BLE_POLL_SUPPORTED_MODELS=<slug1,slug2>`.
+- Some BT firmware/host combinations appear to expose no poll-rate transport at all; probing can return explicit reject status and `get/set` may remain unavailable.
 - Poll-rate over Bluetooth may require per-device key overrides (`RAZECLI_BLE_POLL_READ_KEYS` / `RAZECLI_BLE_POLL_WRITE_KEYS`).
 - Protocol framing follows known Razer packet structure, with additional BLE reverse-engineering work.
 - Most real-hardware validation has been done on DeathAdder V2 Pro. Other models may need key/path tuning; see `Adding BT Support for More Razer Models`.
@@ -347,13 +352,23 @@ razecli --backend macos-ble dpi get --model deathadder-v2-pro
 Experimental BT poll-rate mapping (vendor keys):
 
 ```bash
-# Optional: hide/disable BT poll-rate capability in macos-ble listing/TUI
-RAZECLI_BLE_POLL_CAP=0 razecli --backend macos-ble devices --model deathadder-v2-pro
+# Optional: expose BT poll-rate capability for specific model slugs only
+RAZECLI_BLE_POLL_CAP=1 \
+RAZECLI_BLE_POLL_SUPPORTED_MODELS=basilisk-x-hyperspeed \
+razecli --backend macos-ble devices
 
 # Optional: override candidate vendor keys for poll read/write
 RAZECLI_BLE_POLL_READ_KEYS=00850001,00850000 \
 RAZECLI_BLE_POLL_WRITE_KEYS=00050001,00050000 \
-razecli --backend macos-ble poll-rate get --model deathadder-v2-pro
+RAZECLI_BLE_POLL_CAP=1 \
+RAZECLI_BLE_POLL_SUPPORTED_MODELS=basilisk-x-hyperspeed \
+razecli --backend macos-ble poll-rate get --model basilisk-x-hyperspeed
+
+# Force probe regardless of model policy (for reverse engineering only)
+RAZECLI_BLE_POLL_FORCE=1 RAZECLI_BLE_POLL_CAP=1 razecli --backend macos-ble poll-rate get --model deathadder-v2-pro
+
+# Focused BT poll-rate probe with per-key decode output
+razecli --json ble poll-probe --address F6:F2:0D:4E:D9:30 --attempts 2
 ```
 
 ## Safe vs Legacy Stage Activation
@@ -398,7 +413,9 @@ Recommended workflow when adding a new BT model:
 3. Test vendor transaction path:
 `razecli --json ble raw --name "<device name>" --payload "30 00 00 00 05 81 00 01"`
 4. Map keys for battery/DPI/stages/poll-rate and add/update backend key map.
-5. Add/extend tests in `tests/test_macos_ble_backend.py` and `tests/test_ble_probe.py`.
+5. For BT poll-rate rollout, only allowlist model slug after real hardware validation:
+`RAZECLI_BLE_POLL_SUPPORTED_MODELS=<model-slug>`
+6. Add/extend tests in `tests/test_macos_ble_backend.py` and `tests/test_ble_probe.py`.
 
 ## TUI Shortcuts
 
@@ -429,8 +446,13 @@ MODEL = ModelSpec(
     dpi_min=100,
     dpi_max=30000,
     supported_poll_rates=(125, 500, 1000),
+    ble_poll_rate_supported=False,
+    ble_supported_poll_rates=(),
 )
 ```
+
+`ble_poll_rate_supported` and `ble_supported_poll_rates` are the model-level switches for BT poll-rate rollout.
+Set them only after validated hardware captures for that specific model/firmware.
 
 ## Additional Notes
 

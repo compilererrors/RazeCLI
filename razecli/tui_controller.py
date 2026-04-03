@@ -86,6 +86,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         self._palette: dict[str, int] = {}
         self._job_label: Optional[str] = None
         self._job_results: "queue.Queue[tuple[bool, Any, Optional[Callable[[Any], None]], Optional[Callable[[Exception], None]]]]" = queue.Queue()
+        self._bt_unavailable_fields: dict[str, tuple[str, ...]] = {}
 
     def _init_theme(self) -> None:
         self._palette = {}
@@ -143,13 +144,13 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
     ) -> bool:
         if self._job_label:
             self._set_status(
-                f"{self._job_label} in progress... {self._spinner()}",
+                f"{self._job_label} in progress...",
                 hold_seconds=0.8,
             )
             return False
 
         self._job_label = str(label).strip() or "Working"
-        self._set_status(f"{self._job_label}... {self._spinner()}", hold_seconds=0.4)
+        self._set_status(f"{self._job_label}...", hold_seconds=0.4)
 
         def _runner() -> None:
             try:
@@ -173,6 +174,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             except queue.Empty:
                 break
             drained = True
+            completed_label = str(self._job_label or "").strip()
             self._job_label = None
             if ok:
                 if on_success is not None:
@@ -180,6 +182,18 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                         on_success(payload)
                     except Exception as exc:  # pragma: no cover - defensive
                         self._set_status(f"Post-action failed: {exc}", hold_seconds=8.0)
+                else:
+                    # Avoid leaving stale "Refreshing..." text when a background refresh
+                    # completed without an explicit success message.
+                    status_now = str(self.status).strip().lower()
+                    if completed_label and status_now.startswith(completed_label.lower()):
+                        selected = self._selected()
+                        if selected is not None:
+                            self.status = f"Ready | selected: {selected.identifier}"
+                        elif self.devices:
+                            self.status = f"Found {len(self.devices)} devices"
+                        else:
+                            self.status = "Ready"
                 continue
 
             exc = payload if isinstance(payload, Exception) else Exception(str(payload))
@@ -377,7 +391,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                     ord("]"),
                 ):
                     self._set_status(
-                        f"{self._job_label} in progress... {self._spinner()}",
+                        f"{self._job_label} in progress...",
                         hold_seconds=0.8,
                     )
                     continue

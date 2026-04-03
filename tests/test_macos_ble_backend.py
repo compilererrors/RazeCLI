@@ -30,6 +30,8 @@ class _FakeRawHid:
                 product_id=0x007C,
                 serial="000000000000",
                 backend="rawhid",
+                model_id="deathadder-v2-pro",
+                model_name="Razer DeathAdder V2 Pro",
                 capabilities={"dpi", "dpi-stages", "poll-rate", "battery"},
                 backend_handle={"path": "usb0", "profile": object()},
             ),
@@ -40,6 +42,8 @@ class _FakeRawHid:
                 product_id=0x008E,
                 serial=None,
                 backend="rawhid",
+                model_id="deathadder-v2-pro",
+                model_name="Razer DeathAdder V2 Pro",
                 capabilities={"dpi", "dpi-stages", "poll-rate", "battery"},
                 backend_handle={"path": "bt0", "profile": object()},
             ),
@@ -59,6 +63,8 @@ class _FakeProfiler:
                 product_id=0x008E,
                 serial="02:11:22:33:44:55",
                 backend="macos-profiler",
+                model_id="deathadder-v2-pro",
+                model_name="Razer DeathAdder V2 Pro",
                 capabilities=set(),
                 backend_handle={"source": "test"},
             )
@@ -197,7 +203,14 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.assertIn("dpi", device.capabilities)
         self.assertIn("dpi-stages", device.capabilities)
         self.assertIn("battery", device.capabilities)
-        self.assertIn("poll-rate", device.capabilities)
+        self.assertNotIn("poll-rate", device.capabilities)
+
+    def test_detect_does_not_expose_poll_rate_when_model_not_allowlisted(self):
+        self.backend._poll_capability_enabled = True
+        self.backend._ble_poll_supported_models = set()
+        devices = self.backend.detect()
+        self.assertEqual(len(devices), 1)
+        self.assertNotIn("poll-rate", devices[0].capabilities)
 
     def test_get_dpi_and_set_dpi_uses_vendor_stage_table(self):
         device = self.backend.detect()[0]
@@ -346,14 +359,79 @@ class MacOSBleBackendTest(unittest.TestCase):
         with self.assertRaises(CapabilityUnsupportedError):
             self.backend.set_poll_rate(device, 1000)
 
+    def test_poll_rate_is_model_gated_without_allowlist(self):
+        self.backend._poll_capability_enabled = True
+        self.backend._ble_poll_supported_models = set()
+        device = self.backend.detect()[0]
+        with self.assertRaises(CapabilityUnsupportedError) as ctx:
+            self.backend.get_poll_rate(device)
+        self.assertIn("disabled for model 'deathadder-v2-pro'", str(ctx.exception))
+        self.assertEqual(len(self.fake_vendor.calls), 0)
+
     def test_poll_rate_roundtrip_when_keys_match_device(self):
         os.environ["RAZECLI_BLE_POLL_READ_KEYS"] = "00850001"
         os.environ["RAZECLI_BLE_POLL_WRITE_KEYS"] = "00050001"
+        self.backend._poll_capability_enabled = True
+        self.backend._ble_poll_supported_models = {"deathadder-v2-pro"}
         device = self.backend.detect()[0]
 
         self.assertEqual(self.backend.get_poll_rate(device), 1000)
         self.backend.set_poll_rate(device, 500)
         self.assertEqual(self.backend.get_poll_rate(device), 500)
+
+    def test_poll_rate_marks_bt_endpoint_unavailable_on_explicit_reject(self):
+        os.environ["RAZECLI_BLE_POLL_READ_KEYS"] = "00850001"
+        self.backend._poll_capability_enabled = True
+        self.backend._ble_poll_supported_models = {"deathadder-v2-pro"}
+        device = self.backend.detect()[0]
+        self.assertIn("poll-rate", device.capabilities)
+
+        calls = {"count": 0}
+
+        def _reject_vendor(
+            *,
+            address,
+            name_query,
+            timeout,
+            key,
+            value_payload=None,
+            response_timeout=1.0,
+            write_with_response=True,
+            notify_enabled=True,
+            service_uuid=None,
+            write_char_uuid=None,
+            read_char_uuids=None,
+        ):
+            _ = (
+                address,
+                name_query,
+                timeout,
+                key,
+                value_payload,
+                response_timeout,
+                write_with_response,
+                notify_enabled,
+                service_uuid,
+                write_char_uuid,
+                read_char_uuids,
+            )
+            calls["count"] += 1
+            return {"vendor_decode": {"status": "error", "status_code": 3, "payload_hex": ""}}
+
+        ble_probe_mod.ble_vendor_transceive = _reject_vendor
+
+        with self.assertRaises(CapabilityUnsupportedError):
+            self.backend.get_poll_rate(device)
+        self.assertTrue(bool(device.backend_handle.get("ble_poll_unavailable", False)))
+        self.assertNotIn("poll-rate", device.capabilities)
+        first_calls = int(calls["count"])
+
+        with self.assertRaises(CapabilityUnsupportedError):
+            self.backend.get_poll_rate(device)
+        self.assertEqual(int(calls["count"]), first_calls)
+
+        refreshed = self.backend.detect()[0]
+        self.assertNotIn("poll-rate", refreshed.capabilities)
 
     def test_decode_poll_rate_prefixed_payload(self):
         payload = bytes([0x01, 0x02])
@@ -361,6 +439,8 @@ class MacOSBleBackendTest(unittest.TestCase):
 
     def test_poll_rate_uses_cached_value_when_read_temporarily_fails(self):
         os.environ["RAZECLI_BLE_POLL_READ_KEYS"] = "deadbeef"
+        self.backend._poll_capability_enabled = True
+        self.backend._ble_poll_supported_models = {"deathadder-v2-pro"}
         device = self.backend.detect()[0]
         if isinstance(device.backend_handle, dict):
             device.backend_handle["ble_poll_rate_hz"] = 1000

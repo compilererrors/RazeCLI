@@ -300,10 +300,10 @@ class TuiViewMixin:
         poll_supported = "poll-rate" in selected.capabilities
         poll_text = "-" if self.state.poll_rate is None else f"{self.state.poll_rate} Hz"
         if self.state.poll_rate is None:
-            if bt_008e and not poll_supported:
-                poll_text = "N/A (BT limited)"
+            if bt_008e:
+                poll_text = "N/A (use USB/2.4 for poll-rate)"
             elif poll_supported and not loading_selected:
-                poll_text = "Unavailable (read failed; see Status)"
+                poll_text = "Unavailable"
         battery_text = "-" if self.state.battery is None else f"{self.state.battery}%"
         if bt_008e and self.state.battery is None:
             battery_text = "N/A (BT limited)"
@@ -460,12 +460,20 @@ class TuiViewMixin:
             self._ui_attr("panel_border", curses.A_DIM),
         )
         actions_primary = "Nav: [up/down,k/j] select  [r] refresh  [?] help  [q] quit"
-        actions_secondary = "Edit: [+/-] DPI  [d] custom  [s] next profile  [n] profile count  [p] poll-rate  [[/]] split"
+        selected = self._selected()
+        poll_hint = "  [p] poll-rate" if bool(selected and "poll-rate" in selected.capabilities) else ""
+        actions_secondary = (
+            f"Edit: [+/-] DPI  [d] custom  [s] next profile  [n] profile count{poll_hint}  [[/]] split"
+        )
         self._safe_add(stdscr, height - 3, pad_x, actions_primary, self._ui_attr("footer", curses.A_BOLD))
         self._safe_add(stdscr, height - 2, pad_x, actions_secondary, self._ui_attr("footer", curses.A_BOLD))
         status_text = str(self.status)
         busy_label = self._busy_label()
         if busy_label:
-            status_text = f"{self._spinner()} {busy_label} | {status_text}"
+            status_raw = status_text.strip()
+            if status_raw.lower().startswith(busy_label.lower()):
+                status_text = f"{self._spinner()} {status_raw}"
+            else:
+                status_text = f"{self._spinner()} {busy_label} | {status_raw}"
         self._safe_add(stdscr, height - 1, pad_x, f"Status: {status_text}", self._status_attr())
         stdscr.refresh()

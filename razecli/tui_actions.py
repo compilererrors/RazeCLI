@@ -82,6 +82,13 @@ class TuiActionsMixin:
                 for identifier, ts in self._battery_refreshed_at.items()
                 if identifier in active_ids
             }
+            bt_unavailable = getattr(self, "_bt_unavailable_fields", None)
+            if isinstance(bt_unavailable, dict):
+                self._bt_unavailable_fields = {
+                    identifier: tuple(fields)
+                    for identifier, fields in bt_unavailable.items()
+                    if identifier in active_ids
+                }
 
             if self.preselected_device_id:
                 for idx, device in enumerate(self.devices):
@@ -188,15 +195,24 @@ class TuiActionsMixin:
                             self.status = f"Could not read DPI: {exc}"
 
             if "poll-rate" in device.capabilities:
+                previously_unavailable_fields = tuple(
+                    getattr(self, "_bt_unavailable_fields", {}).get(device.identifier, tuple())
+                )
+                skip_poll_read = bt_experimental and ("poll-rate" in previously_unavailable_fields)
                 try:
-                    state.poll_rate = backend.get_poll_rate(device)
+                    if not skip_poll_read:
+                        state.poll_rate = backend.get_poll_rate(device)
+                    elif cached_state is not None and cached_state.poll_rate is not None:
+                        state.poll_rate = int(cached_state.poll_rate)
+                    else:
+                        bt_read_failed = True
+                        bt_failed_fields.append("poll-rate")
                 except Exception as exc:  # pragma: no cover - runtime/hardware dependent
                     if bt_experimental:
                         if cached_state is not None and cached_state.poll_rate is not None:
                             state.poll_rate = int(cached_state.poll_rate)
-                        else:
-                            bt_read_failed = True
-                            bt_failed_fields.append("poll-rate")
+                        # Poll-rate over BT is optional/experimental; avoid noisy status spam
+                        # during background refresh when only this field is unavailable.
                     else:
                         if not self._status_locked():
                             self.status = f"Could not read poll-rate: {exc}"
@@ -228,8 +244,17 @@ class TuiActionsMixin:
             self.state = state
             self._state_cache[device.identifier] = self._clone_state(state)
             self._state_refreshed_at[device.identifier] = now
-            if bt_read_failed and not self._status_locked():
-                failed = ", ".join(sorted(set(bt_failed_fields)))
+            current_failed = tuple(sorted(set(bt_failed_fields))) if bt_read_failed else tuple()
+            previous_failed = tuple()
+            bt_map = getattr(self, "_bt_unavailable_fields", None)
+            if isinstance(bt_map, dict):
+                previous_failed = tuple(bt_map.get(device.identifier, tuple()))
+                if current_failed:
+                    bt_map[device.identifier] = current_failed
+                else:
+                    bt_map.pop(device.identifier, None)
+            if bt_read_failed and current_failed != previous_failed and not self._status_locked():
+                failed = ", ".join(current_failed)
                 if failed:
                     self.status = (
                         "Bluetooth mode (1532:008E) is experimental; "

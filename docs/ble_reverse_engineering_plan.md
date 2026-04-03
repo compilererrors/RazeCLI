@@ -44,6 +44,75 @@
    - Move `008E` from experimental to stable backend profile.
    - Add regression tests with recorded response fixtures.
 
+## Command Cheat Sheet (Reverse Engineering)
+
+Install/update local editable package:
+
+```bash
+python -m pip install -e .
+```
+
+Device and transport visibility:
+
+```bash
+razecli --json devices --all-transports --model deathadder-v2-pro
+razecli --backend macos-ble --json devices --model deathadder-v2-pro
+```
+
+BLE discovery and service inspection:
+
+```bash
+razecli --json ble scan --timeout 10
+razecli --json ble scan --name "DA" --timeout 10
+razecli --json ble services --address F6:F2:0D:4E:D9:30 --timeout 12
+razecli --json ble services --address F6:F2:0D:4E:D9:30 --read --timeout 12
+```
+
+Alias cache troubleshooting (MAC -> CoreBluetooth UUID):
+
+```bash
+razecli --json ble alias list
+razecli --json ble alias resolve --address F6:F2:0D:4E:D9:30 --timeout 12
+razecli --json ble alias clear --address F6:F2:0D:4E:D9:30
+razecli --json ble alias clear --all
+```
+
+Raw BLE vendor transaction (manual key/payload testing):
+
+```bash
+razecli --json ble raw --address F6:F2:0D:4E:D9:30 --payload "30 00 00 00 05 81 00 01" --timeout 10 --response-timeout 1.5
+razecli --json ble raw --address F6:F2:0D:4E:D9:30 --payload "31 00 00 00 05 80 00 01" --timeout 10 --response-timeout 1.5
+razecli --json ble raw --address F6:F2:0D:4E:D9:30 --payload "32 00 00 00 0B 84 01 00" --timeout 10 --response-timeout 1.5
+```
+
+Focused poll-rate key probing:
+
+```bash
+razecli --json ble poll-probe --address F6:F2:0D:4E:D9:30 --attempts 2
+```
+
+Optional poll probe tuning:
+
+```bash
+razecli --json ble poll-probe --address F6:F2:0D:4E:D9:30 --attempts 3 --key 00850001 --key 0b850100
+```
+
+Force BT poll-rate API path for unsupported models (RE only):
+
+```bash
+RAZECLI_BLE_POLL_CAP=1 \
+RAZECLI_BLE_POLL_FORCE=1 \
+razecli --backend macos-ble poll-rate get --model deathadder-v2-pro
+```
+
+Enable BT poll-rate by model slug (only after validation):
+
+```bash
+RAZECLI_BLE_POLL_CAP=1 \
+RAZECLI_BLE_POLL_SUPPORTED_MODELS=basilisk-x-hyperspeed \
+razecli --backend macos-ble poll-rate get --model basilisk-x-hyperspeed
+```
+
 ## Capture Matrix (Fill During RE)
 
 - Device: DeathAdder V2 Pro
@@ -63,6 +132,27 @@
   - status byte
   - latency (ms)
   - observed mouse-side behavior
+
+## Troubleshooting Guide
+
+- `Device ... was not found` on macOS BLE:
+  - Resolve alias again and retry:
+    - `razecli --json ble alias resolve --address <MAC>`
+  - Run `ble scan` and retry while mouse is active in BT mode.
+  - Use `RAZECLI_BLE_BRUTEFORCE=1` only for debugging discovery edge cases.
+
+- `poll-probe` returns `status: unsupported` with `status_code: 3` or `5`:
+  - Treat BT poll-rate as unavailable on that firmware/host.
+  - Use USB/2.4 for poll-rate.
+  - Keep model BT poll-rate config disabled.
+
+- `poll-probe` returns `status: transport-error`:
+  - This is connect/resolve instability, not protocol rejection.
+  - Retry with active device traffic and refresh alias mapping.
+
+- BT read/write commands are slow or flaky:
+  - Avoid parallel BLE operations.
+  - Keep response timeout modest (`1.0-2.5s`) and use repeated short attempts instead of one very long timeout.
 
 ## Reference Sources
 

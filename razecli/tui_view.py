@@ -89,8 +89,8 @@ class TuiViewMixin:
         footer: str,
     ) -> Tuple[int, int, int, int, int]:
         height, width = stdscr.getmaxyx()
-        max_box_w = max(44, min(width - 6, 92))
-        box_w = max(44, min(max_box_w, width - 4))
+        max_box_w = max(50, min(width - 6, 104))
+        box_w = max(50, min(max_box_w, width - 4))
         text_w = max(20, box_w - 4)
 
         wrapped: List[str] = []
@@ -107,29 +107,47 @@ class TuiViewMixin:
         y = max(1, (height - box_h) // 2)
         x = max(2, (width - box_w) // 2)
 
-        # Dimmed backdrop stripe behind modal.
-        for row in range(y - 1, min(height - 1, y + box_h + 1)):
-            self._safe_add(stdscr, row, max(0, x - 1), " " * min(width - max(0, x - 1) - 1, box_w + 2), curses.A_DIM)
+        backdrop_attr = self._ui_attr("modal_backdrop", curses.A_DIM)
+        border_attr = self._ui_attr("modal_border", curses.A_BOLD)
+        title_attr = self._ui_attr("modal_title", curses.A_BOLD)
+        text_attr = self._ui_attr("modal_text", 0)
+        footer_attr = self._ui_attr("modal_footer", curses.A_DIM)
+        shadow_attr = self._ui_attr("modal_shadow", curses.A_DIM)
+
+        # Full-screen dim backdrop to reduce noise from panels behind modal.
+        fill = " " * max(1, width - 1)
+        for row in range(0, max(0, height - 1)):
+            self._safe_add(stdscr, row, 0, fill, backdrop_attr)
+
+        # Subtle drop shadow around the modal.
+        shadow_x = x + box_w
+        if shadow_x < width - 1:
+            for row in range(y + 1, min(height - 1, y + box_h + 1)):
+                self._safe_add(stdscr, row, shadow_x, " ", shadow_attr)
+        shadow_y = y + box_h
+        if shadow_y < height - 1:
+            shadow_w = max(1, min(box_w, width - x - 1))
+            self._safe_add(stdscr, shadow_y, x + 1, " " * shadow_w, shadow_attr)
 
         # Modal frame.
         horiz = "-" * max(1, box_w - 2)
-        self._safe_add(stdscr, y, x, f"+{horiz}+", curses.A_BOLD)
+        self._safe_add(stdscr, y, x, f"+{horiz}+", border_attr)
         for row in range(y + 1, y + box_h - 1):
-            self._safe_add(stdscr, row, x, "|", curses.A_BOLD)
+            self._safe_add(stdscr, row, x, "|", border_attr)
             self._safe_add(stdscr, row, x + 1, " " * max(1, box_w - 2))
-            self._safe_add(stdscr, row, x + box_w - 1, "|", curses.A_BOLD)
-        self._safe_add(stdscr, y + box_h - 1, x, f"+{horiz}+", curses.A_BOLD)
+            self._safe_add(stdscr, row, x + box_w - 1, "|", border_attr)
+        self._safe_add(stdscr, y + box_h - 1, x, f"+{horiz}+", border_attr)
 
         title_text = f" {title.strip()} "
         if len(title_text) > box_w - 4:
             title_text = title_text[: box_w - 7] + "... "
-        self._safe_add(stdscr, y, x + 2, title_text, curses.A_BOLD)
+        self._safe_add(stdscr, y, x + 2, title_text, title_attr)
 
         row = y + 2
         for line in wrapped:
             if row >= y + box_h - 2:
                 break
-            self._safe_add(stdscr, row, x + 2, line)
+            self._safe_add(stdscr, row, x + 2, line, text_attr)
             row += 1
 
         footer_start_y = y + box_h - 1 - len(footer_lines)
@@ -137,7 +155,7 @@ class TuiViewMixin:
             footer_y = footer_start_y + idx
             if footer_y <= y + 1:
                 continue
-            self._safe_add(stdscr, footer_y, x + 2, line, curses.A_DIM)
+            self._safe_add(stdscr, footer_y, x + 2, line, footer_attr)
 
         stdscr.refresh()
         return y, x, box_h, box_w, text_w
@@ -308,6 +326,33 @@ class TuiViewMixin:
         if bt_008e and self.state.battery is None:
             battery_text = "N/A (BT limited)"
 
+        rgb_cache = getattr(self, "_rgb_cache", None)
+        rgb_state = rgb_cache.get(selected.identifier) if isinstance(rgb_cache, dict) else None
+        if isinstance(rgb_state, dict):
+            rgb_mode = str(rgb_state.get("mode") or "-")
+            rgb_brightness = rgb_state.get("brightness")
+            rgb_color = str(rgb_state.get("color") or "------")
+            if isinstance(rgb_brightness, int):
+                rgb_text = f"{rgb_mode} {rgb_brightness}% #{rgb_color}"
+            else:
+                rgb_text = f"{rgb_mode} #{rgb_color}"
+        elif "rgb" in selected.capabilities:
+            rgb_text = "Not loaded (press g)"
+        else:
+            rgb_text = "-"
+
+        button_cache = getattr(self, "_button_mapping_cache", None)
+        button_state = button_cache.get(selected.identifier) if isinstance(button_cache, dict) else None
+        button_text = "-"
+        if isinstance(button_state, dict):
+            mapping = button_state.get("mapping")
+            if isinstance(mapping, dict) and mapping:
+                side_1 = str(mapping.get("side_1") or "-")
+                side_2 = str(mapping.get("side_2") or "-")
+                button_text = f"side_1={side_1}, side_2={side_2}"
+        elif "button-mapping" in selected.capabilities:
+            button_text = "Not loaded (press b)"
+
         lines.extend(
             [
                 "",
@@ -315,6 +360,8 @@ class TuiViewMixin:
                 f"DPI profile: {dpi_profile_text}",
                 f"Poll-rate: {poll_text}",
                 f"Battery: {battery_text}",
+                f"RGB: {rgb_text}",
+                f"Buttons: {button_text}",
             ]
         )
         if selected.model_id == "deathadder-v2-pro" and "dpi-stages" in selected.capabilities:
@@ -459,7 +506,7 @@ class TuiViewMixin:
             "-" * max(1, width - (pad_x * 2) - 1),
             self._ui_attr("panel_border", curses.A_DIM),
         )
-        actions_primary = "Nav: [up/down,k/j] select  [r] refresh  [?] help  [q] quit"
+        actions_primary = "Nav: [up/down,k/j] select  [r] refresh  [g] RGB  [b] buttons  [?] help  [q] quit"
         selected = self._selected()
         poll_hint = "  [p] poll-rate" if bool(selected and "poll-rate" in selected.capabilities) else ""
         actions_secondary = (

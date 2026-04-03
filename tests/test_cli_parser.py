@@ -200,6 +200,21 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.brightness, 40)
         self.assertEqual(args.color, "#33aa11")
 
+    def test_rgb_menu_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "rgb",
+                "menu",
+                "--all-models",
+                "--all-transports",
+            ]
+        )
+        self.assertEqual(args.command, "rgb")
+        self.assertEqual(args.rgb_command, "menu")
+        self.assertTrue(args.all_models)
+        self.assertTrue(args.all_transports)
+
     def test_button_mapping_set_parse(self):
         parser = build_parser()
         args = parser.parse_args(
@@ -216,6 +231,21 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.button_mapping_command, "set")
         self.assertEqual(args.button, "side_1")
         self.assertEqual(args.action, "mouse:back")
+
+    def test_button_mapping_menu_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "button-mapping",
+                "menu",
+                "--all-models",
+                "--all-transports",
+            ]
+        )
+        self.assertEqual(args.command, "button-mapping")
+        self.assertEqual(args.button_mapping_command, "menu")
+        self.assertTrue(args.all_models)
+        self.assertTrue(args.all_transports)
 
     def test_cli_module_import_is_lazy(self):
         proc = subprocess.run(

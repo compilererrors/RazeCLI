@@ -35,6 +35,7 @@ DEFAULT_POLL_WRITE_KEYS = ("00050001", "00050000", "00050100", "0b050100", "0b05
 # Model-level BLE poll-rate allowlist.
 # Keep empty by default; add slugs only after verified hardware support.
 DEFAULT_BLE_POLL_SUPPORTED_MODELS: Tuple[str, ...] = ()
+DEFAULT_BLE_RGB_SUPPORTED_MODES: Tuple[str, ...] = ("off", "static")
 DEFAULT_RGB_BRIGHTNESS_READ_KEYS = ("10850101", "10850100")
 DEFAULT_RGB_BRIGHTNESS_WRITE_KEYS = ("10050100", "10050101")
 KEY_RGB_FRAME_READ = bytes.fromhex("10840000")
@@ -53,6 +54,12 @@ MIN_PLAUSIBLE_DPI = 100
 MAX_PLAUSIBLE_DPI = 30000
 DEFAULT_NAME_QUERY = "DA V2 Pro"
 RGB_MODES = ("off", "static", "breathing", "spectrum")
+RGB_MODE_SELECTOR_PAYLOADS: Dict[str, bytes] = {
+    # Validated in BLE captures for legacy mode selector.
+    "spectrum": bytes([0x08, 0x00, 0x00, 0x00]),
+    # Observed effect-family selector used by BLE lighting pipelines.
+    "breathing": bytes([0x02, 0x00, 0x00, 0x00]),
+}
 
 BUTTON_SLOT_BY_NAME = {
     "left_click": 0x01,
@@ -62,6 +69,20 @@ BUTTON_SLOT_BY_NAME = {
     "side_2": 0x05,
     "dpi_cycle": 0x60,
 }
+
+MOUSE_ACTION_ID_BY_NAME: Dict[str, int] = {
+    "mouse:left": 0x01,
+    "mouse:right": 0x02,
+    "mouse:middle": 0x03,
+    "mouse:back": 0x04,
+    "mouse:forward": 0x05,
+    "mouse:scroll-up": 0x09,
+    "mouse:scroll-down": 0x0A,
+    "mouse:scroll-left": 0x68,
+    "mouse:scroll-right": 0x69,
+}
+MOUSE_ACTION_NAME_BY_ID: Dict[int, str] = {value: key for key, value in MOUSE_ACTION_ID_BY_NAME.items()}
+DEFAULT_BUTTON_TURBO_RATE = 0x008E
 
 DEFAULT_BUTTON_MAPPING = {
     "left_click": "mouse:left",
@@ -78,7 +99,14 @@ BUTTON_ACTIONS = (
     "mouse:middle",
     "mouse:back",
     "mouse:forward",
+    "mouse:scroll-up",
+    "mouse:scroll-down",
+    "mouse:scroll-left",
+    "mouse:scroll-right",
     "dpi:cycle",
+    "keyboard:0x2c",
+    "keyboard-turbo:0x2c:142",
+    "mouse-turbo:mouse:left:142",
     "disabled",
 )
 
@@ -182,6 +210,28 @@ class MacOSBleBackend(Backend):
             return True
         model = self._model_registry.get(slug)
         return bool(model and model.ble_poll_rate_supported)
+
+    def _model_supported_ble_rgb_modes(self, model_id: Optional[str]) -> Tuple[str, ...]:
+        if self._env_flag("RAZECLI_BLE_RGB_FORCE_ALL_MODES", default=False):
+            return tuple(RGB_MODES)
+
+        slug = str(model_id or "").strip().lower()
+        model = self._model_registry.get(slug) if slug else None
+        raw_modes = tuple(getattr(model, "ble_supported_rgb_modes", ()) or ())
+
+        normalized: List[str] = []
+        for raw in raw_modes:
+            mode = str(raw).strip().lower()
+            if mode in RGB_MODES and mode not in normalized:
+                normalized.append(mode)
+        if not normalized:
+            normalized = list(DEFAULT_BLE_RGB_SUPPORTED_MODES)
+
+        if "off" not in normalized:
+            normalized.insert(0, "off")
+        if "static" not in normalized:
+            normalized.append("static")
+        return tuple(mode for mode in normalized if mode in RGB_MODES)
 
     def _detect_capabilities(
         self,
@@ -431,20 +481,94 @@ class MacOSBleBackend(Backend):
         return None
 
     @staticmethod
+    def _parse_int_token(token: str, *, field: str, minimum: int, maximum: int) -> int:
+        text = str(token).strip().lower()
+        if not text:
+            raise CapabilityUnsupportedError(f"{field} cannot be empty")
+        try:
+            value = int(text, 16) if text.startswith("0x") else int(text, 10)
+        except ValueError as exc:
+            raise CapabilityUnsupportedError(
+                f"Invalid {field} '{token}'. Use decimal or 0x-prefixed hex."
+            ) from exc
+        if value < int(minimum) or value > int(maximum):
+            raise CapabilityUnsupportedError(
+                f"Invalid {field} '{token}'. Allowed range: {minimum}-{maximum}."
+            )
+        return int(value)
+
+    @staticmethod
+    def _parse_turbo_rate(token: Optional[str]) -> int:
+        if token is None or not str(token).strip():
+            return int(DEFAULT_BUTTON_TURBO_RATE)
+        return MacOSBleBackend._parse_int_token(
+            str(token),
+            field="turbo rate",
+            minimum=1,
+            maximum=0x00FF,
+        )
+
+    @staticmethod
     def _build_ble_button_payload(slot: int, action: str) -> bytes:
         action_value = str(action).strip().lower()
-        if action_value == "mouse:left":
-            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00])
-        if action_value == "mouse:right":
-            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00])
-        if action_value == "mouse:middle":
-            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00])
-        if action_value == "mouse:back":
-            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00])
-        if action_value == "mouse:forward":
-            return bytes([0x01, slot, 0x00, 0x01, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00])
+        mouse_button_id = MOUSE_ACTION_ID_BY_NAME.get(action_value)
+        if mouse_button_id is not None:
+            return bytes([0x01, slot, 0x00, 0x01, 0x01, int(mouse_button_id), 0x00, 0x00, 0x00, 0x00])
         if action_value == "dpi:cycle":
             return bytes([0x01, slot, 0x00, 0x06, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00])
+        if action_value.startswith("keyboard:"):
+            key_token = action_value[len("keyboard:") :].strip()
+            hid_key = MacOSBleBackend._parse_int_token(
+                key_token,
+                field="keyboard HID code",
+                minimum=0,
+                maximum=0x00FF,
+            )
+            return bytes([0x01, slot, 0x00, 0x02, 0x02, 0x00, int(hid_key), 0x00, 0x00, 0x00])
+        if action_value.startswith("keyboard-turbo:"):
+            rest = action_value[len("keyboard-turbo:") :].strip()
+            key_token, rate_token = (rest.split(":", 1) + [None])[:2]
+            hid_key = MacOSBleBackend._parse_int_token(
+                key_token,
+                field="keyboard HID code",
+                minimum=0,
+                maximum=0x00FF,
+            )
+            turbo_rate = MacOSBleBackend._parse_turbo_rate(rate_token)
+            return bytes(
+                [0x01, slot, 0x00, 0x0D, 0x04, 0x00, int(hid_key), 0x00, int(turbo_rate & 0xFF), int((turbo_rate >> 8) & 0xFF)]
+            )
+        if action_value.startswith("mouse-turbo:"):
+            rest = action_value[len("mouse-turbo:") :].strip()
+            mouse_action = rest
+            rate_token: Optional[str] = None
+            if rest not in MOUSE_ACTION_ID_BY_NAME and ":" in rest:
+                candidate_action, candidate_rate = rest.rsplit(":", 1)
+                if candidate_action in MOUSE_ACTION_ID_BY_NAME:
+                    mouse_action = candidate_action
+                    rate_token = candidate_rate
+            mouse_button_id = MOUSE_ACTION_ID_BY_NAME.get(mouse_action)
+            if mouse_button_id is None:
+                allowed = ", ".join(sorted(MOUSE_ACTION_ID_BY_NAME))
+                raise CapabilityUnsupportedError(
+                    f"Unsupported mouse-turbo action '{rest}'. Supported mouse actions: {allowed}"
+                )
+            turbo_rate = MacOSBleBackend._parse_turbo_rate(rate_token)
+            p0 = ((int(mouse_button_id) - 1) << 8) | 0x0003
+            return bytes(
+                [
+                    0x01,
+                    slot,
+                    0x00,
+                    0x0E,
+                    int(p0 & 0xFF),
+                    int((p0 >> 8) & 0xFF),
+                    int(turbo_rate & 0xFF),
+                    int((turbo_rate >> 8) & 0xFF),
+                    0x00,
+                    0x00,
+                ]
+            )
         if action_value == "disabled":
             # Layer clear/default payload observed in BLE captures.
             return bytes([0x01, slot, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -454,7 +578,7 @@ class MacOSBleBackend(Backend):
 
     @staticmethod
     def _decode_ble_button_payload(slot: int, payload: bytes) -> Optional[str]:
-        if len(payload) < 6:
+        if len(payload) < 10:
             return None
         if int(payload[0]) != 0x01:
             return None
@@ -462,27 +586,36 @@ class MacOSBleBackend(Backend):
             return None
 
         action_class = int(payload[3])
-        action_len = int(payload[4])
-        data = list(payload[5 : 5 + max(0, min(action_len, 5))])
+        p0 = int(payload[4]) | (int(payload[5]) << 8)
+        p1 = int(payload[6]) | (int(payload[7]) << 8)
+        p2 = int(payload[8]) | (int(payload[9]) << 8)
 
         if action_class == 0x00:
             return "disabled"
-        if action_class == 0x01 and action_len >= 1 and data:
-            button_id = int(data[0])
-            if button_id == 0x01:
-                return "mouse:left"
-            if button_id == 0x02:
-                return "mouse:right"
-            if button_id == 0x03:
-                return "mouse:middle"
-            if button_id == 0x04:
-                return "mouse:back"
-            if button_id == 0x05:
-                return "mouse:forward"
-            return None
-        if action_class == 0x06 and action_len >= 1 and data and int(data[0]) == 0x06:
+        if action_class == 0x01 and (p0 & 0x00FF) == 0x01:
+            button_id = int((p0 >> 8) & 0x00FF)
+            return MOUSE_ACTION_NAME_BY_ID.get(button_id)
+        if action_class == 0x06 and p0 == 0x0601:
             return "dpi:cycle"
+        if action_class == 0x02 and p0 == 0x0002:
+            hid_key = int(p1 & 0x00FF)
+            return f"keyboard:0x{hid_key:02x}"
+        if action_class == 0x0D and p0 == 0x0004:
+            hid_key = int(p1 & 0x00FF)
+            turbo_rate = int(p2 & 0xFFFF)
+            return f"keyboard-turbo:0x{hid_key:02x}:{turbo_rate}"
+        if action_class == 0x0E and (p0 & 0x00FF) == 0x03:
+            button_id = int(((p0 >> 8) & 0x00FF) + 1)
+            mouse_action = MOUSE_ACTION_NAME_BY_ID.get(button_id)
+            if mouse_action is None:
+                return None
+            turbo_rate = int(p1 & 0xFFFF)
+            return f"mouse-turbo:{mouse_action}:{turbo_rate}"
         return None
+
+    @staticmethod
+    def _rgb_mode_selector_payload(mode: str) -> Optional[bytes]:
+        return RGB_MODE_SELECTOR_PAYLOADS.get(str(mode).strip().lower())
 
     @staticmethod
     def _rgb_color_from_payload(payload: bytes) -> Optional[str]:
@@ -1578,6 +1711,7 @@ class MacOSBleBackend(Backend):
 
     def get_rgb(self, device: DetectedDevice) -> Dict[str, Any]:
         handle = self._device_handle(device)
+        supported_modes = self._model_supported_ble_rgb_modes(device.model_id)
         read_keys = self._rgb_brightness_read_keys(handle)
 
         brightness_percent: Optional[int] = None
@@ -1608,9 +1742,28 @@ class MacOSBleBackend(Backend):
             cached_color = self._normalize_color_hex(str(handle.get("ble_rgb_color") or "").strip() or None)
             color_hex = cached_color or "00ff00"
 
-        mode = "off" if brightness_percent <= 0 else str(handle.get("ble_rgb_mode") or "static")
-        if mode not in RGB_MODES:
-            mode = "off" if brightness_percent <= 0 else "static"
+        mode_inferred = False
+        if brightness_percent <= 0:
+            mode = "off"
+        else:
+            cached_mode = str(handle.get("ble_rgb_mode") or "").strip().lower()
+            if cached_mode in RGB_MODES and cached_mode != "off":
+                mode = cached_mode
+            else:
+                # BLE mode-read is not fully mapped on this device profile yet.
+                # Preserve compatibility by returning "static" as a safe fallback,
+                # but mark the value as inferred so callers can prefer local intent.
+                mode = "static"
+                mode_inferred = True
+
+        if mode not in supported_modes:
+            if brightness_percent <= 0 and "off" in supported_modes:
+                mode = "off"
+            elif "static" in supported_modes:
+                mode = "static"
+            else:
+                mode = str(supported_modes[0] if supported_modes else "off")
+            mode_inferred = True
 
         handle["ble_rgb_mode"] = mode
         handle["ble_rgb_color"] = color_hex
@@ -1618,9 +1771,10 @@ class MacOSBleBackend(Backend):
 
         return {
             "mode": mode,
+            "mode_inferred": bool(mode_inferred),
             "brightness": int(brightness_percent),
             "color": color_hex,
-            "modes_supported": list(RGB_MODES),
+            "modes_supported": list(supported_modes),
         }
 
     def set_rgb(
@@ -1633,13 +1787,15 @@ class MacOSBleBackend(Backend):
     ) -> Dict[str, Any]:
         handle = self._device_handle(device)
         mode_value = str(mode).strip().lower()
+        supported_modes = self._model_supported_ble_rgb_modes(device.model_id)
         if mode_value not in RGB_MODES:
             raise CapabilityUnsupportedError(
                 f"Unsupported RGB mode '{mode}'. Supported: {', '.join(RGB_MODES)}"
             )
-        if mode_value not in {"off", "static"}:
+        if mode_value not in supported_modes:
             raise CapabilityUnsupportedError(
-                "BLE RGB hardware write currently supports 'off' and 'static' modes"
+                "RGB mode write over Bluetooth is not mapped for this model yet. "
+                f"Requested '{mode_value}'. Supported over BLE: {', '.join(supported_modes)}"
             )
 
         current: Dict[str, Any] = {}
@@ -1650,7 +1806,7 @@ class MacOSBleBackend(Backend):
                 "mode": "off",
                 "brightness": 100,
                 "color": "00ff00",
-                "modes_supported": list(RGB_MODES),
+                "modes_supported": list(supported_modes),
             }
 
         color_hex = self._normalize_color_hex(color) or str(current.get("color") or "00ff00")
@@ -1661,13 +1817,21 @@ class MacOSBleBackend(Backend):
         if mode_value == "off":
             brightness_percent = 0
 
-        if mode_value == "static":
+        if mode_value in {"static", "breathing"}:
             rgb = bytes.fromhex(color_hex)
             frame_payload = bytes([0x04, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2]])
             _ = self._vendor_call(
                 device=device,
                 key=KEY_RGB_FRAME_WRITE,
                 value_payload=frame_payload,
+            )
+
+        selector_payload = self._rgb_mode_selector_payload(mode_value)
+        if selector_payload is not None:
+            _ = self._vendor_call(
+                device=device,
+                key=KEY_RGB_MODE_WRITE,
+                value_payload=selector_payload,
             )
 
         brightness_u8 = self._rgb_percent_to_u8(brightness_percent)
@@ -1698,9 +1862,10 @@ class MacOSBleBackend(Backend):
 
         return {
             "mode": mode_value,
+            "mode_inferred": False,
             "brightness": int(brightness_percent),
             "color": color_hex,
-            "modes_supported": list(RGB_MODES),
+            "modes_supported": list(supported_modes),
         }
 
     def get_button_mapping(self, device: DetectedDevice) -> Dict[str, Any]:

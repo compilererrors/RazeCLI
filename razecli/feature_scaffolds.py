@@ -17,6 +17,12 @@ _DEFAULT_RGB = {
     "brightness": 100,
     "color": "00ff00",
 }
+_DEFAULT_RGB_PRESETS = {
+    "off": {"mode": "off", "brightness": 0, "color": "000000"},
+    "static-green": {"mode": "static", "brightness": 60, "color": "00ff00"},
+    "breathing-warm": {"mode": "breathing", "brightness": 45, "color": "ff5500"},
+    "spectrum-medium": {"mode": "spectrum", "brightness": 60, "color": "00ff00"},
+}
 
 _DA_V2_PRO_BUTTONS = (
     "left_click",
@@ -42,7 +48,14 @@ _DA_V2_PRO_ACTIONS = (
     "mouse:middle",
     "mouse:back",
     "mouse:forward",
+    "mouse:scroll-up",
+    "mouse:scroll-down",
+    "mouse:scroll-left",
+    "mouse:scroll-right",
     "dpi:cycle",
+    "keyboard:0x2c",
+    "keyboard-turbo:0x2c:142",
+    "mouse-turbo:mouse:left:142",
     "dpi:stage:1",
     "dpi:stage:2",
     "dpi:stage:3",
@@ -68,6 +81,7 @@ def _default_store() -> Dict[str, Any]:
     return {
         "version": 1,
         "rgb": {},
+        "rgb_presets": {},
         "button_mapping": {},
     }
 
@@ -90,8 +104,13 @@ def _read_store(path: Path) -> Dict[str, Any]:
         raise RazeCliError(f"Feature store has invalid format: {path}")
 
     data.setdefault("rgb", {})
+    data.setdefault("rgb_presets", {})
     data.setdefault("button_mapping", {})
-    if not isinstance(data["rgb"], dict) or not isinstance(data["button_mapping"], dict):
+    if (
+        not isinstance(data["rgb"], dict)
+        or not isinstance(data["rgb_presets"], dict)
+        or not isinstance(data["button_mapping"], dict)
+    ):
         raise RazeCliError(f"Feature store has invalid format: {path}")
     return data
 
@@ -205,6 +224,112 @@ def set_rgb_scaffold(
     payload["hardware_apply"] = "not-implemented"
     payload["scope"] = "local-scaffold"
     return store_path, payload
+
+
+def get_rgb_presets(model_id: Optional[str], path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    store_path = resolve_feature_store_path(path)
+    store = _read_store(store_path)
+    key = _model_key(model_id)
+    raw = store.get("rgb_presets", {}).get(key, {})
+    if not isinstance(raw, dict):
+        raw = {}
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for name, preset in _DEFAULT_RGB_PRESETS.items():
+        merged[str(name)] = {
+            "mode": str(preset.get("mode", "off")),
+            "brightness": int(preset.get("brightness", 100)),
+            "color": _normalize_rgb_color(str(preset.get("color", "00ff00"))),
+        }
+
+    for name, preset in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(preset, dict):
+            continue
+        mode = str(preset.get("mode", "off")).strip().lower()
+        if mode not in _RGB_MODES:
+            continue
+        try:
+            brightness = int(preset.get("brightness", 100))
+        except (TypeError, ValueError):
+            continue
+        if brightness < 0 or brightness > 100:
+            continue
+        try:
+            color = _normalize_rgb_color(str(preset.get("color", "00ff00")))
+        except RazeCliError:
+            continue
+        merged[name.strip()] = {
+            "mode": mode,
+            "brightness": int(brightness),
+            "color": color,
+        }
+    return merged
+
+
+def save_rgb_preset(
+    model_id: Optional[str],
+    *,
+    name: str,
+    mode: str,
+    brightness: int,
+    color: str,
+    path: Optional[str] = None,
+) -> Tuple[Path, Dict[str, Dict[str, Any]]]:
+    preset_name = str(name).strip()
+    if not preset_name:
+        raise RazeCliError("Preset name cannot be empty")
+
+    mode_value = str(mode).strip().lower()
+    if mode_value not in _RGB_MODES:
+        raise RazeCliError(f"Unsupported RGB mode: {mode_value}. Allowed: {', '.join(_RGB_MODES)}")
+
+    if int(brightness) < 0 or int(brightness) > 100:
+        raise RazeCliError("RGB brightness must be between 0 and 100")
+
+    color_value = _normalize_rgb_color(str(color))
+
+    store_path = resolve_feature_store_path(path)
+    store = _read_store(store_path)
+    key = _model_key(model_id)
+    model_store = store["rgb_presets"].setdefault(key, {})
+    if not isinstance(model_store, dict):
+        model_store = {}
+        store["rgb_presets"][key] = model_store
+
+    model_store[preset_name] = {
+        "mode": mode_value,
+        "brightness": int(brightness),
+        "color": color_value,
+    }
+    _write_store(store_path, store)
+    return store_path, get_rgb_presets(model_id=model_id, path=path)
+
+
+def delete_rgb_preset(
+    model_id: Optional[str],
+    *,
+    name: str,
+    path: Optional[str] = None,
+) -> Tuple[Path, Dict[str, Dict[str, Any]]]:
+    preset_name = str(name).strip()
+    if not preset_name:
+        raise RazeCliError("Preset name cannot be empty")
+
+    if preset_name in _DEFAULT_RGB_PRESETS:
+        raise RazeCliError("Built-in presets cannot be deleted")
+
+    store_path = resolve_feature_store_path(path)
+    store = _read_store(store_path)
+    key = _model_key(model_id)
+    model_store = store.get("rgb_presets", {}).get(key, {})
+    if not isinstance(model_store, dict):
+        model_store = {}
+    model_store.pop(preset_name, None)
+    store["rgb_presets"][key] = model_store
+    _write_store(store_path, store)
+    return store_path, get_rgb_presets(model_id=model_id, path=path)
 
 
 def get_button_mapping_scaffold(model_id: Optional[str], path: Optional[str] = None) -> Dict[str, Any]:

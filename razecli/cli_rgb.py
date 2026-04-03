@@ -7,19 +7,52 @@ from typing import Any, Dict
 
 from razecli.cli_common import emit, resolve_target_device
 from razecli.device_service import DeviceService
-from razecli.errors import CapabilityUnsupportedError, RazeCliError
+from razecli.errors import CapabilityUnsupportedError, DeviceSelectionError, RazeCliError
 from razecli.feature_scaffolds import get_rgb_scaffold, set_rgb_scaffold
 
 
 def _merge_rgb_state(local_rgb: Dict[str, Any], hardware_rgb: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(local_rgb)
-    for key in ("mode", "brightness", "color", "modes_supported"):
+    mode_inferred = bool(hardware_rgb.get("mode_inferred", False))
+    for key in ("brightness", "color", "modes_supported"):
         if key in hardware_rgb:
             merged[key] = hardware_rgb[key]
+
+    if "mode" in hardware_rgb:
+        if mode_inferred:
+            local_mode = str(local_rgb.get("mode") or "").strip().lower()
+            supported = [str(item).strip().lower() for item in merged.get("modes_supported", [])]
+            if local_mode and local_mode != "off" and (not supported or local_mode in supported):
+                merged["mode"] = local_mode
+            else:
+                merged["mode"] = hardware_rgb["mode"]
+        else:
+            merged["mode"] = hardware_rgb["mode"]
+
+    if "mode_inferred" in hardware_rgb:
+        merged["mode_inferred"] = bool(hardware_rgb["mode_inferred"])
     return merged
 
 
 def handle_rgb(service: DeviceService, args: argparse.Namespace) -> int:
+    if args.rgb_command == "menu":
+        if args.json:
+            raise RazeCliError("--json is not supported in interactive TUI mode")
+
+        from razecli.tui import run_tui
+
+        model_filter = None if bool(getattr(args, "all_models", False)) else args.model
+        if model_filter and service.registry.get(model_filter) is None:
+            raise DeviceSelectionError(f"Unknown model: {model_filter}")
+
+        return run_tui(
+            service=service,
+            model_filter=model_filter,
+            preselected_device_id=args.device,
+            collapse_transports=not bool(getattr(args, "all_transports", False)),
+            startup_editor="rgb",
+        )
+
     device = resolve_target_device(service, args)
     backend = service.resolve_backend(device)
 

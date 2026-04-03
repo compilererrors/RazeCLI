@@ -11,6 +11,7 @@ from razecli.cli_battery import handle_battery
 from razecli.cli_button_mapping import handle_button_mapping
 from razecli.cli_devices import handle_devices
 from razecli.cli_rgb import handle_rgb
+from razecli.feature_scaffolds import set_rgb_scaffold
 from razecli.types import DetectedDevice
 
 
@@ -380,6 +381,47 @@ class CliJsonContractTest(unittest.TestCase):
         self.assertEqual(payload["rgb"]["brightness"], 65)
         self.assertEqual(payload["rgb"]["color"], "112233")
         self.assertEqual(payload["rgb"]["hardware_apply"], "read")
+
+    def test_rgb_get_prefers_local_mode_when_hardware_mode_is_inferred(self):
+        device = DetectedDevice(
+            identifier="macos-ble:1532:008E:bt:ABC",
+            name="DA V2 Pro",
+            vendor_id=0x1532,
+            product_id=0x008E,
+            backend="macos-ble",
+            model_id="deathadder-v2-pro",
+            capabilities={"dpi", "rgb"},
+        )
+        backend = _FakeHardwareBackend()
+        backend._rgb["mode"] = "static"
+        backend._rgb["mode_inferred"] = True
+        service = _FakeService(device, backend=backend)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = str(Path(tmp_dir) / "feature_store.json")
+            set_rgb_scaffold(
+                model_id=device.model_id,
+                mode="breathing",
+                brightness=50,
+                color="00ff88",
+                path=store,
+            )
+            args = argparse.Namespace(
+                rgb_command="get",
+                store_file=store,
+                model=None,
+                device=None,
+                json=True,
+            )
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = handle_rgb(service, args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["rgb"]["mode"], "breathing")
+            self.assertEqual(payload["rgb"]["brightness"], 65)
+            self.assertEqual(payload["rgb"]["hardware_apply"], "read")
 
     def test_button_actions_prefers_hardware_actions_when_available(self):
         device = DetectedDevice(

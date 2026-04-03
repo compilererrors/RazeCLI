@@ -30,8 +30,8 @@ class TuiActionsMixin:
         "left_click": "Mouse 1 (Left)",
         "right_click": "Mouse 2 (Right)",
         "middle_click": "Mouse 3 (Middle)",
-        "side_1": "Mouse 4 (Side 1)",
-        "side_2": "Mouse 5 (Side 2)",
+        "side_1": "Mouse 4 (Rear Side)",
+        "side_2": "Mouse 5 (Front Side)",
         "dpi_cycle": "DPI Button",
     }
 
@@ -74,8 +74,8 @@ class TuiActionsMixin:
             "   8       .'    |   '.",
             f"         / {m1} | {m2}\\",
             f"         |      {m3}    |",
-            f"    {m4}|       |       |",
-            f"    {m5}|---------------|",
+            f"    {m5}|       |       |",
+            f"    {m4}|---------------|",
             "         |               |",
             "         |               |",
             "         |;             .|",

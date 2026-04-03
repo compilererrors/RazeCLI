@@ -161,13 +161,11 @@ Option 3 (fast local executable): build an onedir bundle (larger output, much fa
 Option 4 (no venv, Homebrew from release asset):
 
 ```bash
-brew install --formula "https://github.com/compilererrors/RazeCLI/releases/download/<tag>/razecli.rb"
+brew install --formula "https://github.com/compilererrors/RazeCLI/releases/latest/download/razecli.rb"
 razecli --help
 ```
 
-Use a real release tag (for example `v0.1.2`) in the URL.  
-This Homebrew path installs the packaged `onedir` asset for faster startup than onefile.
-The `Manual Release` GitHub Action can optionally open a PR that updates this README URL to the newly published tag.
+This Homebrew path installs the packaged `onedir` asset from the latest release.
 
 ## Usage
 

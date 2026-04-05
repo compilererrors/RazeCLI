@@ -38,6 +38,14 @@ def _add_target_args(parser: argparse.ArgumentParser, default_model: bool = True
         help="Target device id (from `razecli devices`)",
     )
     parser.add_argument(
+        "--address",
+        metavar="MAC_OR_UUID",
+        help=(
+            "Bluetooth MAC (e.g. F6:F2:0D:4E:D9:30) or UUID fragment. "
+            "With macos-ble, picks the device whose address matches (same value as `ble ... --address`)."
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=DEFAULT_MODEL if default_model else None,
         help=(

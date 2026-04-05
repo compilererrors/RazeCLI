@@ -1286,9 +1286,14 @@ def handle_ble(args: argparse.Namespace) -> int:
                         }
                     )
 
+        # Prefer the richest DPI table (most stages), then keys that agreed most often.
         signatures = sorted(
             signature_rows.values(),
-            key=lambda row: (-int(row.get("count") or 0), str(row.get("bank_signature") or "")),
+            key=lambda row: (
+                -int(row.get("stages_count") or 0),
+                -int(row.get("count") or 0),
+                str(row.get("bank_signature") or ""),
+            ),
         )
         primary_bank_signature = str(signatures[0]["bank_signature"]) if signatures else None
         bank_signature = primary_bank_signature if len(signatures) == 1 else None

@@ -526,6 +526,61 @@ class CliJsonContractTest(unittest.TestCase):
             cli_ble_mod.ble_vendor_transceive = original_vendor
             cli_ble_mod.ble_alias_resolve = original_alias_resolve
 
+    def test_ble_bank_probe_primary_prefers_richest_stage_table(self):
+        """When multiple keys decode to different signatures, primary picks most stages."""
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        original_alias_resolve = cli_ble_mod.ble_alias_resolve
+
+        def fake_vendor(**kwargs):
+            key_hex = bytes(kwargs.get("key") or b"").hex()
+            if key_hex.endswith("840200"):
+                payload_hex = "010101e803e80300"
+            else:
+                payload_hex = "01110211e803e803000022400640060003"
+            return {
+                "vendor_decode": {
+                    "status": "success",
+                    "status_code": 2,
+                    "payload_hex": payload_hex,
+                }
+            }
+
+        cli_ble_mod.ble_vendor_transceive = fake_vendor
+        cli_ble_mod.ble_alias_resolve = lambda **_kwargs: {
+            "requested_mac": "02:11:22:33:44:55",
+            "resolved_address": "AABBCCDD-0011-2233-4455-66778899AABB",
+        }
+        args = argparse.Namespace(
+            ble_command="bank-probe",
+            address="02:11:22:33:44:55",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=["0b840100", "0b840200"],
+            include_write_keys=False,
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(len(payload["signatures"]), 2)
+            primary = payload["primary_bank_signature"]
+            two_stage_sig = next(
+                s["bank_signature"]
+                for s in payload["signatures"]
+                if int(s.get("stages_count") or 0) == 2
+            )
+            self.assertEqual(primary, two_stage_sig)
+            self.assertIsNone(payload.get("bank_signature"))
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+            cli_ble_mod.ble_alias_resolve = original_alias_resolve
+
     def test_ble_bank_snapshot_json_contract(self):
         original_vendor = cli_ble_mod.ble_vendor_transceive
         cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {

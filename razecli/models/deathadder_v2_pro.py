@@ -13,9 +13,8 @@ MODEL = ModelSpec(
     supported_poll_rates=(125, 500, 1000),
     ble_poll_rate_supported=False,
     ble_supported_poll_rates=(),
-    # BLE RGB mode-write for this model/host is partially mapped.
-    # Spectrum remains disabled until selector mapping is fully verified.
-    ble_supported_rgb_modes=("off", "static", "breathing"),
+    # BLE RGB: OpenSnek-class 10:83 zone read exposes effect id (e.g. 0x04 = spectrum).
+    ble_supported_rgb_modes=("off", "static", "breathing", "breathing-single", "spectrum"),
     ble_endpoint_product_ids=(0x008E,),
     ble_endpoint_experimental=True,
     ble_multi_profile_table_limited=True,

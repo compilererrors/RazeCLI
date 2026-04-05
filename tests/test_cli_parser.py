@@ -53,6 +53,24 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.active, 2)
         self.assertEqual(args.stage, ["800:800", "1600:1600"])
 
+    def test_dpi_stages_get_parse_with_ble_address(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--backend",
+                "macos-ble",
+                "dpi-stages",
+                "get",
+                "--model",
+                "deathadder-v2-pro",
+                "--address",
+                "F6:F2:0D:4E:D9:30",
+            ]
+        )
+        self.assertEqual(args.command, "dpi-stages")
+        self.assertEqual(args.dpi_stages_command, "get")
+        self.assertEqual(args.address, "F6:F2:0D:4E:D9:30")
+
     def test_quick_set_parse(self):
         parser = build_parser()
         args = parser.parse_args(["set", "1500", "--model", "deathadder-v2-pro"])

@@ -55,6 +55,17 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             minimum=0.30,
             maximum=0.70,
         )
+        self._dpi_adjust_step = max(
+            1,
+            int(
+                self._env_float(
+                    "RAZECLI_TUI_DPI_ADJUST_STEP",
+                    default=float(DPI_STEP),
+                    minimum=1.0,
+                    maximum=5000.0,
+                )
+            ),
+        )
         self._state_cache: dict[str, DeviceState] = {}
         self._state_refreshed_at: dict[str, float] = {}
         self._battery_refreshed_at: dict[str, float] = {}
@@ -126,6 +137,17 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         )
         self._state_refresh_retry_attempts = 0
         self._state_refresh_retry_due_at = 0.0
+        self._feature_prefetch_lock = threading.Lock()
+        self._feature_prefetch_inflight_devices: set[str] = set()
+        self._feature_prefetch_inflight_features: set[tuple[str, str]] = set()
+        self._feature_prefetch_attempted: set[tuple[str, str]] = set()
+        self._feature_prefetch_retry_due_at: dict[tuple[str, str], float] = {}
+        self._feature_prefetch_retry_delay_s = self._env_float(
+            "RAZECLI_TUI_FEATURE_PREFETCH_RETRY_DELAY",
+            default=2.0,
+            minimum=0.2,
+            maximum=30.0,
+        )
 
     def _init_theme(self) -> None:
         self._palette = {}
@@ -366,7 +388,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         tuned_defaults = {
             "RAZECLI_BLE_BACKEND_TIMEOUT": "2.4",
             "RAZECLI_BLE_BACKEND_RESPONSE_TIMEOUT": "0.55",
-            "RAZECLI_BLE_DPI_READ_ATTEMPTS": "1",
+            "RAZECLI_BLE_DPI_READ_ATTEMPTS": "3",
             "RAZECLI_BLE_DPI_READ_RETRY_DELAY": "0.02",
             "RAZECLI_BLE_POLL_READ_ATTEMPTS": "1",
             "RAZECLI_BLE_POLL_READ_RETRY_DELAY": "0.0",
@@ -396,7 +418,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             "  r: Refresh devices\n"
             "\n"
             "Device actions\n"
-            "  + / -: Adjust DPI step\n"
+            f"  + / -: Adjust DPI by {int(self._dpi_adjust_step)} (keyboard)\n"
             "  d: Set custom DPI\n"
             "  g: RGB editor\n"
             "  b: Button-mapping table/editor (manual + capture assist)\n"
@@ -424,6 +446,82 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
         if self.selected_index >= len(self.devices):
             self.selected_index = len(self.devices) - 1
         return self.devices[self.selected_index]
+
+    def _maybe_schedule_feature_prefetch(self) -> None:
+        if self._startup_editor_pending:
+            return
+        device = self._selected()
+        if device is None:
+            return
+        if self._is_detect_only_backend(device):
+            return
+
+        feature_targets: list[tuple[str, dict[str, dict[str, Any]], str]] = []
+        if "rgb" in device.capabilities and device.identifier not in self._rgb_cache:
+            feature_targets.append(("rgb", self._rgb_cache, "get_rgb"))
+        if "button-mapping" in device.capabilities and device.identifier not in self._button_mapping_cache:
+            feature_targets.append(("button-mapping", self._button_mapping_cache, "get_button_mapping"))
+        if not feature_targets:
+            return
+
+        device_id = str(device.identifier)
+        with self._feature_prefetch_lock:
+            if device_id in self._feature_prefetch_inflight_devices:
+                return
+            now = time.monotonic()
+            pending = [
+                (feature, cache_ref, method_name)
+                for feature, cache_ref, method_name in feature_targets
+                if (device_id, feature) not in self._feature_prefetch_attempted
+                and now >= float(self._feature_prefetch_retry_due_at.get((device_id, feature), 0.0))
+            ]
+            if not pending:
+                return
+            self._feature_prefetch_inflight_devices.add(device_id)
+            self._feature_prefetch_inflight_features.update(
+                (device_id, feature) for feature, _, _ in pending
+            )
+
+        def _worker() -> None:
+            try:
+                backend = self.service.resolve_backend(device)
+                for feature, cache_ref, method_name in pending:
+                    cache_key = (device_id, feature)
+                    success = False
+                    try:
+                        getter = getattr(backend, method_name, None)
+                        if getter is None:
+                            continue
+                        payload = getter(device)
+                        if isinstance(payload, dict):
+                            cache_ref[device_id] = dict(payload)
+                            success = True
+                    except Exception:
+                        pass
+                    finally:
+                        with self._feature_prefetch_lock:
+                            self._feature_prefetch_inflight_features.discard(cache_key)
+                            if success:
+                                self._feature_prefetch_attempted.add(cache_key)
+                                self._feature_prefetch_retry_due_at.pop(cache_key, None)
+                            else:
+                                self._feature_prefetch_retry_due_at[cache_key] = (
+                                    time.monotonic() + float(self._feature_prefetch_retry_delay_s)
+                                )
+            finally:
+                with self._feature_prefetch_lock:
+                    self._feature_prefetch_inflight_devices.discard(device_id)
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"razecli-feature-prefetch-{device_id.lower().replace(':', '').replace('-', '')}",
+        ).start()
+
+    def _is_feature_prefetch_inflight(self, device_id: str, feature: str) -> bool:
+        key = (str(device_id), str(feature))
+        with self._feature_prefetch_lock:
+            return key in self._feature_prefetch_inflight_features
 
     def _has_pending_activity(self) -> bool:
         return bool(
@@ -507,6 +605,8 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                     ):
                         self._last_idle_refresh_at = now
                         self._queue_state_refresh(force=False)
+                    if not self._has_pending_activity():
+                        self._maybe_schedule_feature_prefetch()
                     continue
 
                 if key == ord("q"):
@@ -539,10 +639,10 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                     self._move_selection(1)
                     continue
                 if key in (ord("+"), ord("=")):
-                    self._adjust_dpi(DPI_STEP)
+                    self._adjust_dpi(int(self._dpi_adjust_step))
                     continue
                 if key == ord("-"):
-                    self._adjust_dpi(-DPI_STEP)
+                    self._adjust_dpi(-int(self._dpi_adjust_step))
                     continue
                 if key == ord("d"):
                     self._set_custom_dpi(stdscr)

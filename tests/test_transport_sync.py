@@ -1,5 +1,6 @@
 import unittest
 
+from razecli.model_registry import ModelRegistry
 from razecli.transport_sync import iter_transport_mirror_targets
 from razecli.types import DetectedDevice
 
@@ -7,6 +8,7 @@ from razecli.types import DetectedDevice
 class _FakeService:
     def __init__(self, devices):
         self._devices = devices
+        self.registry = ModelRegistry.load()
 
     def discover_devices(self, model_filter=None, collapse_transports=True):  # noqa: ARG002
         return list(self._devices)
@@ -68,4 +70,3 @@ class TransportSyncTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

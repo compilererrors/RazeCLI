@@ -11,7 +11,7 @@ from razecli.errors import RazeCliError
 
 _DEFAULT_STORE_PATH = Path.home() / ".config" / "razecli" / "feature_scaffolds.json"
 
-_RGB_MODES = ("off", "static", "breathing", "spectrum")
+_RGB_MODES = ("off", "static", "breathing", "breathing-single", "breathing-random", "spectrum")
 _DEFAULT_RGB = {
     "mode": "off",
     "brightness": 100,
@@ -20,8 +20,9 @@ _DEFAULT_RGB = {
 _DEFAULT_RGB_PRESETS = {
     "off": {"mode": "off", "brightness": 0, "color": "000000"},
     "static-green": {"mode": "static", "brightness": 60, "color": "00ff00"},
-    "breathing-green-60": {"mode": "breathing", "brightness": 60, "color": "00ff00"},
-    "breathing-warm": {"mode": "breathing", "brightness": 45, "color": "ff5500"},
+    "breathing-green": {"mode": "breathing-single", "brightness": 60, "color": "00ff00"},
+    "breathing-random": {"mode": "breathing-random", "brightness": 60, "color": "00ff00"},
+    "breathing-warm": {"mode": "breathing-single", "brightness": 45, "color": "ff5500"},
     "spectrum-medium": {"mode": "spectrum", "brightness": 60, "color": "00ff00"},
 }
 
@@ -65,6 +66,15 @@ _DA_V2_PRO_ACTIONS = (
     "poll:1000",
     "disabled",
 )
+
+_MODEL_BUTTON_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "deathadder-v2-pro": {
+        "buttons": list(_DA_V2_PRO_BUTTONS),
+        "actions": list(_DA_V2_PRO_ACTIONS),
+        "default_mapping": dict(_DA_V2_PRO_DEFAULT_MAPPING),
+        "strict_buttons": True,
+    }
+}
 
 
 def resolve_feature_store_path(path: Optional[str] = None) -> Path:
@@ -130,12 +140,13 @@ def _model_key(model_id: Optional[str]) -> str:
 
 
 def _schema_for_model(model_id: Optional[str]) -> Dict[str, Any]:
-    if model_id == "deathadder-v2-pro":
+    schema = _MODEL_BUTTON_SCHEMAS.get(_model_key(model_id))
+    if isinstance(schema, dict):
         return {
-            "buttons": list(_DA_V2_PRO_BUTTONS),
-            "actions": list(_DA_V2_PRO_ACTIONS),
-            "default_mapping": dict(_DA_V2_PRO_DEFAULT_MAPPING),
-            "strict_buttons": True,
+            "buttons": list(schema.get("buttons", [])),
+            "actions": list(schema.get("actions", [])),
+            "default_mapping": dict(schema.get("default_mapping", {})),
+            "strict_buttons": bool(schema.get("strict_buttons", False)),
         }
 
     return {

@@ -1,17 +1,18 @@
 import unittest
 import os
 from dataclasses import replace
+from typing import Optional
 
 import razecli.backends.macos_ble_backend as macos_ble_backend_mod
 import razecli.ble_probe as ble_probe_mod
 from razecli.backends.macos_ble_backend import (
     KEY_RGB_FRAME_READ,
     KEY_RGB_FRAME_WRITE,
+    KEY_RGB_MODE_READ,
     KEY_RGB_MODE_WRITE,
     KEY_BATTERY_RAW_READ,
     KEY_BATTERY_STATUS_READ,
     KEY_DPI_STAGES_READ,
-    KEY_DPI_STAGES_WRITE,
     MacOSBleBackend,
     PRIMARY_VENDOR_READ_CHAR_UUID,
 )
@@ -76,10 +77,16 @@ class _FakeProfiler:
 class _FakeVendorCall:
     def __init__(self):
         self.calls = []
+        # Optional hex payloads for extra 0x0B84 read keys (multi-key merge tests).
+        self.extra_dpi_read_payloads: Optional[dict[str, str]] = None
         self.poll_code = 0x01
         self.rgb_brightness = 0x80
+        self.rgb_brightness_status = None
+        self.rgb_brightness_status_code = None
         self.rgb_color = (0x00, 0xFF, 0x00)
         self.rgb_mode_selector = 0x00
+        self.rgb_mode_read_enabled = True
+        self.rgb_frame_payload_override = None
         self.button_payloads = {}
 
     def __call__(
@@ -123,7 +130,16 @@ class _FakeVendorCall:
             # active sid=0x11, two stages: 1000 and 1600 (little-endian)
             payload_hex = "110211e803e803000022400640060003"
             return {"vendor_decode": {"payload_hex": payload_hex}}
-        if key_bytes == KEY_DPI_STAGES_WRITE:
+        if (
+            len(key_bytes) == 4
+            and int(key_bytes[0]) == 0x0B
+            and int(key_bytes[1]) == 0x84
+            and isinstance(self.extra_dpi_read_payloads, dict)
+        ):
+            extra = self.extra_dpi_read_payloads.get(key_bytes.hex())
+            if extra:
+                return {"vendor_decode": {"payload_hex": extra}}
+        if len(key_bytes) == 4 and int(key_bytes[0]) == 0x0B and int(key_bytes[1]) == 0x04:
             return {"vendor_decode": {"payload_hex": ""}}
         if key_bytes == bytes.fromhex("00850001"):
             return {"vendor_decode": {"payload_hex": f"{self.poll_code:02x}"}}
@@ -133,16 +149,27 @@ class _FakeVendorCall:
                 self.poll_code = int(payload[0])
             return {"vendor_decode": {"payload_hex": ""}}
         if key_bytes in (bytes.fromhex("10850101"), bytes.fromhex("10850100")):
-            return {"vendor_decode": {"payload_hex": f"{self.rgb_brightness:02x}"}}
+            payload = {"payload_hex": f"{self.rgb_brightness:02x}"}
+            if self.rgb_brightness_status is not None:
+                payload["status"] = str(self.rgb_brightness_status)
+            if self.rgb_brightness_status_code is not None:
+                payload["status_code"] = int(self.rgb_brightness_status_code)
+            return {"vendor_decode": payload}
         if key_bytes in (bytes.fromhex("10050100"), bytes.fromhex("10050101")):
             payload = bytes(value_payload or b"")
             if payload:
                 self.rgb_brightness = int(payload[0])
             return {"vendor_decode": {"payload_hex": ""}}
         if key_bytes == KEY_RGB_FRAME_READ:
+            if isinstance(self.rgb_frame_payload_override, bytes):
+                return {"vendor_decode": {"payload_hex": self.rgb_frame_payload_override.hex()}}
             r, g, b = self.rgb_color
             payload_hex = f"0400000000{r:02x}{g:02x}{b:02x}"
             return {"vendor_decode": {"payload_hex": payload_hex}}
+        if key_bytes == KEY_RGB_MODE_READ:
+            if not self.rgb_mode_read_enabled:
+                raise CapabilityUnsupportedError("mode read unavailable")
+            return {"vendor_decode": {"payload_hex": f"{int(self.rgb_mode_selector) & 0xFF:02x}"}}
         if key_bytes == KEY_RGB_FRAME_WRITE:
             payload = bytes(value_payload or b"")
             if len(payload) >= 8:
@@ -161,7 +188,11 @@ class _FakeVendorCall:
             slot = int(key_bytes[3])
             payload = self.button_payloads.get(
                 slot,
-                bytes([0x01, slot, 0x00, 0x01, 0x01, slot, 0x00, 0x00, 0x00, 0x00]),
+                (
+                    bytes([0x01, slot, 0x00, 0x06, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00])
+                    if slot == 0x60
+                    else bytes([0x01, slot, 0x00, 0x01, 0x01, slot, 0x00, 0x00, 0x00, 0x00])
+                ),
             )
             return {"vendor_decode": {"payload_hex": payload.hex()}}
         raise AssertionError(f"unexpected key {key_bytes.hex()}")
@@ -227,19 +258,59 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.assertEqual(dpi, (1000, 1000))
 
         self.backend.set_dpi(device, 1700, 1700)
-        write_calls = [row for row in self.fake_vendor.calls if row["key_hex"] == KEY_DPI_STAGES_WRITE.hex()]
-        self.assertEqual(len(write_calls), 1)
-        write_payload = write_calls[0]["value_payload"]
-        self.assertEqual(len(write_payload), 16)
-        # Active stage id preserved from read (0x11)
-        self.assertEqual(write_payload[0], 0x11)
-        # Stage count remains 2
-        self.assertEqual(write_payload[1], 2)
-        # First stage updated to 1700 (0x06A4 -> A4 06 little-endian)
-        self.assertEqual(write_payload[3], 0xA4)
-        self.assertEqual(write_payload[4], 0x06)
-        self.assertEqual(write_payload[5], 0xA4)
-        self.assertEqual(write_payload[6], 0x06)
+        write_calls = [row for row in self.fake_vendor.calls if row["key_hex"].startswith("0b04")]
+        self.assertEqual(len(write_calls), 2)
+        for row in write_calls:
+            write_payload = row["value_payload"]
+            self.assertEqual(len(write_payload), 16)
+            # Active stage id preserved from read (0x11)
+            self.assertEqual(write_payload[0], 0x11)
+            # Stage count remains 2
+            self.assertEqual(write_payload[1], 2)
+            # First stage updated to 1700 (0x06A4 -> A4 06 little-endian)
+            self.assertEqual(write_payload[3], 0xA4)
+            self.assertEqual(write_payload[4], 0x06)
+            self.assertEqual(write_payload[5], 0xA4)
+            self.assertEqual(write_payload[6], 0x06)
+
+    def test_read_dpi_merges_keys_prefers_richest_stage_table(self):
+        device = self.backend.detect()[0]
+        self.fake_vendor.extra_dpi_read_payloads = {
+            # Three stages @ 1000 / 1600 / 2400 (varstore-prefixed layout)
+            "0b840101": "01010301e803e80300000240064006000303600960090003",
+        }
+        active, stages = self.backend.get_dpi_stages(device)
+        self.assertEqual(active, 1)
+        self.assertEqual(len(stages), 3)
+        self.assertEqual(stages[0], (1000, 1000))
+        self.assertEqual(stages[1], (1600, 1600))
+        self.assertEqual(stages[2], (2400, 2400))
+        self.fake_vendor.extra_dpi_read_payloads = None
+
+    def test_set_dpi_stages_ble_expansion_resequences_stage_ids(self):
+        device = self.backend.detect()[0]
+        self.backend.get_dpi_stages(device)
+        self.fake_vendor.calls.clear()
+
+        five = [
+            (800, 800),
+            (1200, 1200),
+            (1600, 1600),
+            (2000, 2000),
+            (2400, 2400),
+        ]
+        self.backend.set_dpi_stages(device, 1, five)
+        write_calls = [row for row in self.fake_vendor.calls if row["key_hex"].startswith("0b04")]
+        self.assertEqual(len(write_calls), 2)
+        wp = write_calls[0]["value_payload"]
+        self.assertEqual(write_calls[1]["value_payload"], wp)
+        self.assertEqual(len(wp), 37)
+        self.assertEqual(wp[1], 5)
+        self.assertEqual(wp[0], 1)
+        offset = 2
+        for i in range(5):
+            self.assertEqual(wp[offset], i + 1)
+            offset += 7
 
     def test_parse_dpi_stages_with_varstore_prefixed_layout(self):
         # Layout: [varstore, active, count, stage blocks...]
@@ -253,6 +324,16 @@ class MacOSBleBackendTest(unittest.TestCase):
     def test_decode_payload_falls_back_to_read_rows(self):
         result = {
             "vendor_decode": {"payload_hex": "e6"},
+            "reads": [
+                {"char_uuid": PRIMARY_VENDOR_READ_CHAR_UUID, "value_hex": "01110211e803e803000022400640060003"},
+            ],
+        }
+        payload = self.backend._decode_payload_bytes(result, key=KEY_DPI_STAGES_READ)
+        self.assertEqual(payload, bytes.fromhex("01110211e803e803000022400640060003"))
+
+    def test_decode_dpi_stages_prefers_full_table_over_compact_vendor_hex(self):
+        result = {
+            "vendor_decode": {"payload_hex": "1101dc05dc050003"},
             "reads": [
                 {"char_uuid": PRIMARY_VENDOR_READ_CHAR_UUID, "value_hex": "01110211e803e803000022400640060003"},
             ],
@@ -531,10 +612,13 @@ class MacOSBleBackendTest(unittest.TestCase):
             action="mouse:back",
         )
         self.assertEqual(state["mapping"]["side_1"], "mouse:back")
+        self.assertEqual(state["read_confidence"]["overall"], "verified")
 
         current = self.backend.get_button_mapping(device)
         self.assertEqual(current["mapping"]["side_1"], "mouse:back")
         self.assertIn("left_click", current["mapping"])
+        self.assertEqual(current["read_confidence"]["overall"], "verified")
+        self.assertEqual(current["read_confidence"]["inferred_buttons"], [])
 
     def test_rgb_spectrum_mode_writes_mode_selector(self):
         device = self.backend.detect()[0]
@@ -565,6 +649,54 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.assertEqual(self.fake_vendor.rgb_mode_selector, 0x02)
         self.assertEqual(self.fake_vendor.rgb_color, (0x22, 0x44, 0x66))
 
+    def test_get_rgb_uses_mode_selector_when_brightness_is_zero(self):
+        device = self.backend.detect()[0]
+        model = self.backend._model_registry.get("deathadder-v2-pro")
+        self.assertIsNotNone(model)
+        self.backend._model_registry._models["deathadder-v2-pro"] = replace(
+            model,
+            ble_supported_rgb_modes=("off", "static", "breathing", "spectrum"),
+        )
+        self.fake_vendor.rgb_brightness = 0x00
+        self.fake_vendor.rgb_mode_selector = 0x02
+        state = self.backend.get_rgb(device)
+        self.assertEqual(state["brightness"], 0)
+        self.assertEqual(state["mode"], "breathing")
+        self.assertFalse(state["mode_inferred"])
+        self.assertEqual(state["read_confidence"]["overall"], "verified")
+        self.assertEqual(state["read_confidence"]["brightness"], "verified")
+        self.assertEqual(state["read_confidence"]["mode"], "verified")
+        self.assertEqual(state["read_confidence"]["mode_selector"], 0x02)
+
+    def test_get_rgb_infers_cached_mode_when_mode_read_missing_and_brightness_zero(self):
+        device = self.backend.detect()[0]
+        self.fake_vendor.rgb_brightness = 0x00
+        self.fake_vendor.rgb_mode_read_enabled = False
+        if isinstance(device.backend_handle, dict):
+            device.backend_handle["ble_rgb_mode"] = "breathing"
+        state = self.backend.get_rgb(device)
+        self.assertEqual(state["brightness"], 0)
+        self.assertEqual(state["mode"], "breathing")
+        self.assertTrue(state["mode_inferred"])
+        self.assertEqual(state["read_confidence"]["mode"], "inferred")
+
+    def test_get_rgb_ignores_unrecognized_frame_payload_and_keeps_cached_color(self):
+        device = self.backend.detect()[0]
+        if isinstance(device.backend_handle, dict):
+            device.backend_handle["ble_rgb_color"] = "11aa22"
+        self.fake_vendor.rgb_frame_payload_override = bytes.fromhex("01000560")
+        state = self.backend.get_rgb(device)
+        self.assertEqual(state["color"], "11aa22")
+
+    def test_get_rgb_ignores_error_brightness_payload(self):
+        device = self.backend.detect()[0]
+        self.fake_vendor.rgb_brightness = 0x04
+        self.fake_vendor.rgb_brightness_status = "error"
+        self.fake_vendor.rgb_brightness_status_code = 3
+        state = self.backend.get_rgb(device)
+        self.assertEqual(state["brightness"], 100)
+        self.assertEqual(state["read_confidence"]["brightness"], "inferred-default")
+
     def test_rgb_spectrum_rejected_by_default_model_policy(self):
         device = self.backend.detect()[0]
         with self.assertRaises(CapabilityUnsupportedError):
@@ -578,6 +710,20 @@ class MacOSBleBackendTest(unittest.TestCase):
         current = self.backend.get_button_mapping(device)
         self.assertEqual(current["mapping"]["side_2"], "mouse:scroll-down")
         self.assertEqual(current["mapping"]["side_1"], "keyboard:0x2c")
+
+    def test_button_mapping_decodes_compact_16byte_ble_layout(self):
+        device = self.backend.detect()[0]
+        # Compact layout observed in live BLE probes:
+        # [slot, profile?, 0x01, 0x01, 0x01, 0x01, action_id, slot, ...]
+        self.fake_vendor.button_payloads[0x04] = bytes.fromhex("04000101010104040000000000000000")
+        self.fake_vendor.button_payloads[0x05] = bytes.fromhex("05000101010105050000000000000000")
+        self.fake_vendor.button_payloads[0x60] = bytes.fromhex("60000101010100000000000000000000")
+
+        current = self.backend.get_button_mapping(device)
+        self.assertEqual(current["mapping"]["side_1"], "mouse:back")
+        self.assertEqual(current["mapping"]["side_2"], "mouse:forward")
+        self.assertEqual(current["mapping"]["dpi_cycle"], "disabled")
+        self.assertEqual(current["read_confidence"]["overall"], "verified")
 
 
 if __name__ == "__main__":

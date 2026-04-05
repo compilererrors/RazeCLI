@@ -31,6 +31,10 @@ def _merge_rgb_state(local_rgb: Dict[str, Any], hardware_rgb: Dict[str, Any]) ->
 
     if "mode_inferred" in hardware_rgb:
         merged["mode_inferred"] = bool(hardware_rgb["mode_inferred"])
+    if "read_confidence" in hardware_rgb:
+        confidence = hardware_rgb.get("read_confidence")
+        if isinstance(confidence, dict):
+            merged["read_confidence"] = dict(confidence)
     return merged
 
 

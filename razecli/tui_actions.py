@@ -1204,12 +1204,12 @@ class TuiActionsMixin:
             return
 
         backend = self.service.resolve_backend(device)
-        loaded = self._load_current_dpi_profiles(stdscr, device=device, backend=backend)
-        if loaded is None:
-            return
-        active_stage, current = loaded
+        # Same pattern as `_set_dpi_profile_count`: go straight to prompts using main-panel
+        # state; defer BLE `get_dpi_stages` until we need it for the BLE caution dialog only.
+        cached_active = int(self.state.dpi_active_stage or 1)
+        cached_current = list(self.state.dpi_stages or [])
 
-        default_count = len(current) if current else 1
+        default_count = len(cached_current) if cached_current else 1
         target_count = self._prompt_int(
             stdscr,
             f"Target DPI profile count (1-{MAX_DPI_STAGES})",
@@ -1226,7 +1226,7 @@ class TuiActionsMixin:
             )
             return
 
-        default_x, default_y = self._default_stage_dpi(active_stage, current)
+        default_x, default_y = self._default_stage_dpi(cached_active, cached_current)
         base_x = self._prompt_int(
             stdscr,
             "Base DPI X (stage 1)",
@@ -1245,10 +1245,10 @@ class TuiActionsMixin:
             return
 
         default_increment = 400
-        if len(current) >= 2:
+        if len(cached_current) >= 2:
             try:
-                inferred_x = int(current[1][0]) - int(current[0][0])
-                inferred_y = int(current[1][1]) - int(current[0][1])
+                inferred_x = int(cached_current[1][0]) - int(cached_current[0][0])
+                inferred_y = int(cached_current[1][1]) - int(cached_current[0][1])
                 if inferred_x == inferred_y and inferred_x != 0:
                     default_increment = int(inferred_x)
             except Exception:
@@ -1270,7 +1270,7 @@ class TuiActionsMixin:
             )
             return
 
-        default_active = int(active_stage)
+        default_active = int(cached_active)
         if default_active < 1 or default_active > int(target_count):
             default_active = 1
         new_active = self._prompt_int(
@@ -1298,12 +1298,28 @@ class TuiActionsMixin:
                 )
             )
 
-        if (
+        ble_limited = (
             self._is_ble_endpoint_device(device)
             and device.backend == "macos-ble"
             and self._ble_multi_profile_table_limited(device)
-            and len(current) <= 1
-            and int(target_count) > len(current)
+        )
+        current_for_caution = list(cached_current)
+        if ble_limited and (
+            not current_for_caution
+            or (len(current_for_caution) <= 1 and int(target_count) > len(current_for_caution))
+        ):
+            self._set_status("Loading current DPI profiles...", hold_seconds=3.0)
+            try:
+                _a, stages = backend.get_dpi_stages(device)
+                current_for_caution = [(int(x), int(y)) for (x, y) in list(stages)]
+            except Exception:
+                pass
+
+        if (
+            ble_limited
+            and current_for_caution
+            and len(current_for_caution) <= 1
+            and int(target_count) > len(current_for_caution)
         ):
             self._show_action_dialog(
                 stdscr,
@@ -1369,11 +1385,14 @@ class TuiActionsMixin:
             return
 
         backend = self.service.resolve_backend(device)
-        loaded = self._load_current_dpi_profiles(stdscr, device=device, backend=backend)
-        if loaded is None:
-            return
-        active_stage, stages = loaded
-        default_name = f"{str(device.model_id or 'dpi').strip()}-{len(stages)}lvl"
+        cached_active = int(self.state.dpi_active_stage or 1)
+        cached_stages = list(self.state.dpi_stages or [])
+        model_slug = str(device.model_id or "dpi").strip() or "dpi"
+        default_name = (
+            f"{model_slug}-{len(cached_stages)}lvl"
+            if cached_stages
+            else f"{model_slug}-dpi"
+        )
         preset_name = self._prompt_text(
             stdscr,
             "Preset name",
@@ -1391,6 +1410,17 @@ class TuiActionsMixin:
                 message="Preset name cannot be empty.",
             )
             return
+
+        stages = [(int(x), int(y)) for (x, y) in cached_stages]
+        active_stage = int(cached_active)
+        if not stages:
+            loaded = self._load_current_dpi_profiles(stdscr, device=device, backend=backend)
+            if loaded is None:
+                return
+            active_stage, stages = loaded[0], [(int(x), int(y)) for (x, y) in loaded[1]]
+        else:
+            if active_stage < 1 or active_stage > len(stages):
+                active_stage = 1
 
         try:
             path = save_dpi_stage_preset(
@@ -1987,16 +2017,19 @@ class TuiActionsMixin:
         index = max(0, min(len(values) - 1, int(default_index)))
 
         stdscr.timeout(-1)
+        menu_frame = 0
         while True:
             body_lines = [str(description).strip(), ""]
             for idx, value in enumerate(values):
                 marker = ">" if idx == index else " "
                 body_lines.append(f"{marker} {value}")
+            menu_frame += 1
             self._draw_modal_box(
                 stdscr,
                 title=title,
                 body_lines=body_lines,
                 footer=footer,
+                dim_full_screen=(menu_frame == 1),
             )
             key = stdscr.getch()
             if key in (curses.KEY_UP, ord("k")):

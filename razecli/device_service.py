@@ -226,12 +226,52 @@ class DeviceService:
         return self.backends_by_name[device.backend]
 
 
+def normalize_ble_address_query(raw: Optional[str]) -> Optional[str]:
+    """Normalize user MAC/UUID text for matching against device ids and serials."""
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if not text or text in {"...", "…"}:
+        return None
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def device_matches_ble_address(device: DetectedDevice, query_compact: str) -> bool:
+    """True if ``query_compact`` (from :func:`normalize_ble_address_query`) identifies this device."""
+    if not query_compact:
+        return False
+    ident_compact = "".join(ch for ch in (device.identifier or "").lower() if ch.isalnum())
+    if query_compact in ident_compact:
+        return True
+    serial_compact = normalize_ble_address_query(device.serial)
+    if serial_compact and serial_compact == query_compact:
+        return True
+    handle = device.backend_handle if isinstance(device.backend_handle, dict) else {}
+    bt = handle.get("bt_address")
+    if isinstance(bt, str):
+        bt_q = normalize_ble_address_query(bt)
+        if bt_q and bt_q == query_compact:
+            return True
+    return False
+
+
 def select_device(
     devices: Sequence[DetectedDevice],
     device_id: Optional[str] = None,
     model_id: Optional[str] = None,
+    ble_address: Optional[str] = None,
 ) -> DetectedDevice:
     matches = list(devices)
+
+    if ble_address:
+        query = normalize_ble_address_query(ble_address)
+        if query:
+            matches = [device for device in matches if device_matches_ble_address(device, query)]
+            if not matches:
+                raise DeviceSelectionError(
+                    f"No device matches BLE address '{ble_address}'. "
+                    "Use `razecli devices` for the exact id, or check MAC/UUID spelling."
+                )
 
     if device_id:
         matches = [device for device in matches if device.identifier == device_id]
@@ -251,5 +291,5 @@ def select_device(
 
     device_ids = ", ".join(device.identifier for device in matches)
     raise DeviceSelectionError(
-        f"Multiple devices match. Specify --device. Available ids: {device_ids}"
+        f"Multiple devices match. Specify --device or --address. Available ids: {device_ids}"
     )

@@ -48,6 +48,7 @@ def resolve_target_device(service: DeviceService, args: argparse.Namespace):
         devices,
         device_id=getattr(args, "device", None),
         model_id=model_filter,
+        ble_address=getattr(args, "address", None),
     )
 
 

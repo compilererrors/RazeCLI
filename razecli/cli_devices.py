@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 from razecli.cli_common import emit
-from razecli.device_service import DeviceService
+from razecli.device_service import DeviceService, device_matches_ble_address, normalize_ble_address_query
 
 
 def handle_devices(service: DeviceService, args: argparse.Namespace) -> int:
@@ -15,6 +15,10 @@ def handle_devices(service: DeviceService, args: argparse.Namespace) -> int:
     )
     if args.device:
         devices = [device for device in devices if device.identifier == args.device]
+
+    addr_q = normalize_ble_address_query(getattr(args, "address", None))
+    if addr_q:
+        devices = [device for device in devices if device_matches_ble_address(device, addr_q)]
 
     if args.json:
         emit([device.to_dict() for device in devices], as_json=True)

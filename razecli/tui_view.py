@@ -91,6 +91,7 @@ class TuiViewMixin:
         title: str,
         body_lines: Sequence[str],
         footer: str,
+        dim_full_screen: bool = True,
     ) -> Tuple[int, int, int, int, int]:
         height, width = stdscr.getmaxyx()
         max_box_w = max(50, min(width - 6, 104))
@@ -118,10 +119,12 @@ class TuiViewMixin:
         footer_attr = self._ui_attr("modal_footer", curses.A_DIM)
         shadow_attr = self._ui_attr("modal_shadow", curses.A_DIM)
 
-        # Full-screen dim backdrop to reduce noise from panels behind modal.
-        fill = " " * max(1, width - 1)
-        for row in range(0, max(0, height - 1)):
-            self._safe_add(stdscr, row, 0, fill, backdrop_attr)
+        # Full-screen dim backdrop (first paint). Skipping on repeats avoids O(screen)
+        # work on every arrow key in `_select_menu`.
+        if dim_full_screen:
+            fill = " " * max(1, width - 1)
+            for row in range(0, max(0, height - 1)):
+                self._safe_add(stdscr, row, 0, fill, backdrop_attr)
 
         # Subtle drop shadow around the modal.
         shadow_x = x + box_w
@@ -421,13 +424,19 @@ class TuiViewMixin:
                     f"Onboard profile fp={sig} (no snapshot match — "
                     f"switch underside bank + ble bank-snapshot --label …)"
                 )
-            lines.extend(["", bank_line])
+            lines.extend(
+                [
+                    "",
+                    bank_line,
+                    "Edits here apply to the onboard bank selected on the mouse (underside switch), not a software-only mode.",
+                ]
+            )
         elif self._has_onboard_profile_bank_switch(selected) and "dpi-stages" in selected.capabilities:
             lines.extend(
                 [
                     "",
-                    "Tip: Underside profile button switches onboard bank; BLE DPI applies per bank.",
-                    "Save `ble bank-snapshot --label …` to label each bank; TUI shows fp match when known.",
+                    "Tip: Underside profile button switches onboard bank; BLE DPI reads/writes use that active bank.",
+                    "Save `ble bank-snapshot --label …` per bank; TUI matches fp when the BLE table matches a snapshot.",
                 ]
             )
         if bt_endpoint:

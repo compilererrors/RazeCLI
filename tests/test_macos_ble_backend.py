@@ -86,6 +86,7 @@ class _FakeVendorCall:
         self.rgb_color = (0x00, 0xFF, 0x00)
         self.rgb_mode_selector = 0x00
         self.rgb_mode_read_enabled = True
+        self.rgb_mode_read_payload_hex: Optional[str] = None
         self.rgb_frame_payload_override = None
         self.button_payloads = {}
 
@@ -139,6 +140,9 @@ class _FakeVendorCall:
             extra = self.extra_dpi_read_payloads.get(key_bytes.hex())
             if extra:
                 return {"vendor_decode": {"payload_hex": extra}}
+        if len(key_bytes) == 4 and int(key_bytes[0]) == 0x0B and int(key_bytes[1]) == 0x84:
+            # Other 0x0B84 read keys (e.g. 0b840300) — empty unless overridden above.
+            return {"vendor_decode": {"payload_hex": ""}}
         if len(key_bytes) == 4 and int(key_bytes[0]) == 0x0B and int(key_bytes[1]) == 0x04:
             return {"vendor_decode": {"payload_hex": ""}}
         if key_bytes == bytes.fromhex("00850001"):
@@ -169,6 +173,14 @@ class _FakeVendorCall:
         if key_bytes == KEY_RGB_MODE_READ:
             if not self.rgb_mode_read_enabled:
                 raise CapabilityUnsupportedError("mode read unavailable")
+            if isinstance(self.rgb_mode_read_payload_hex, str) and self.rgb_mode_read_payload_hex.strip():
+                return {
+                    "vendor_decode": {
+                        "status": "success",
+                        "status_code": 2,
+                        "payload_hex": self.rgb_mode_read_payload_hex.strip().lower(),
+                    }
+                }
             return {"vendor_decode": {"payload_hex": f"{int(self.rgb_mode_selector) & 0xFF:02x}"}}
         if key_bytes == KEY_RGB_FRAME_WRITE:
             payload = bytes(value_payload or b"")
@@ -204,10 +216,12 @@ class MacOSBleBackendTest(unittest.TestCase):
             "RAZECLI_BLE_POLL_READ_KEYS": os.environ.get("RAZECLI_BLE_POLL_READ_KEYS"),
             "RAZECLI_BLE_POLL_WRITE_KEYS": os.environ.get("RAZECLI_BLE_POLL_WRITE_KEYS"),
             "RAZECLI_BLE_POLL_CAP": os.environ.get("RAZECLI_BLE_POLL_CAP"),
+            "RAZECLI_BLE_RGB_SKIP_MODE_READ": os.environ.get("RAZECLI_BLE_RGB_SKIP_MODE_READ"),
         }
         os.environ["RAZECLI_BLE_POLL_READ_KEYS"] = "deadbeef"
         os.environ["RAZECLI_BLE_POLL_WRITE_KEYS"] = "feedbeef"
         os.environ.pop("RAZECLI_BLE_POLL_CAP", None)
+        os.environ.pop("RAZECLI_BLE_RGB_SKIP_MODE_READ", None)
         self.backend = MacOSBleBackend()
         self.backend._supported = True
         self.backend._rawhid = _FakeRawHid()
@@ -259,7 +273,7 @@ class MacOSBleBackendTest(unittest.TestCase):
 
         self.backend.set_dpi(device, 1700, 1700)
         write_calls = [row for row in self.fake_vendor.calls if row["key_hex"].startswith("0b04")]
-        self.assertEqual(len(write_calls), 2)
+        self.assertEqual(len(write_calls), 4)
         for row in write_calls:
             write_payload = row["value_payload"]
             self.assertEqual(len(write_payload), 16)
@@ -287,6 +301,20 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.assertEqual(stages[2], (2400, 2400))
         self.fake_vendor.extra_dpi_read_payloads = None
 
+    def test_read_dpi_merges_prefers_840300_when_it_has_more_stages(self):
+        device = self.backend.detect()[0]
+        self.fake_vendor.extra_dpi_read_payloads = {
+            # Richer table on the 0x0300 read family (onboard bank B on some firmware).
+            "0b840300": (
+                "01010401e803e80300000240064006000003d007d007000004980898080003"
+            ),
+        }
+        active, stages = self.backend.get_dpi_stages(device)
+        self.assertEqual(active, 1)
+        self.assertEqual(len(stages), 4)
+        self.assertEqual(stages[3], (2200, 2200))
+        self.fake_vendor.extra_dpi_read_payloads = None
+
     def test_set_dpi_stages_ble_expansion_resequences_stage_ids(self):
         device = self.backend.detect()[0]
         self.backend.get_dpi_stages(device)
@@ -301,9 +329,10 @@ class MacOSBleBackendTest(unittest.TestCase):
         ]
         self.backend.set_dpi_stages(device, 1, five)
         write_calls = [row for row in self.fake_vendor.calls if row["key_hex"].startswith("0b04")]
-        self.assertEqual(len(write_calls), 2)
+        self.assertEqual(len(write_calls), 4)
         wp = write_calls[0]["value_payload"]
-        self.assertEqual(write_calls[1]["value_payload"], wp)
+        for row in write_calls:
+            self.assertEqual(row["value_payload"], wp)
         self.assertEqual(len(wp), 37)
         self.assertEqual(wp[1], 5)
         self.assertEqual(wp[0], 1)
@@ -697,10 +726,34 @@ class MacOSBleBackendTest(unittest.TestCase):
         self.assertEqual(state["brightness"], 100)
         self.assertEqual(state["read_confidence"]["brightness"], "inferred-default")
 
-    def test_rgb_spectrum_rejected_by_default_model_policy(self):
+    def test_get_rgb_skips_mode_read_when_skip_env_set(self):
+        os.environ["RAZECLI_BLE_RGB_SKIP_MODE_READ"] = "1"
+        self.fake_vendor.calls.clear()
+        try:
+            device = self.backend.detect()[0]
+            self.backend.get_rgb(device)
+            mode_reads = [c for c in self.fake_vendor.calls if c["key_hex"] == KEY_RGB_MODE_READ.hex()]
+            self.assertEqual(len(mode_reads), 0)
+        finally:
+            os.environ.pop("RAZECLI_BLE_RGB_SKIP_MODE_READ", None)
+
+    def test_get_rgb_detects_spectrum_from_1083_zone_payload(self):
         device = self.backend.detect()[0]
-        with self.assertRaises(CapabilityUnsupportedError):
-            self.backend.set_rgb(device, mode="spectrum", brightness=60, color=None)
+        self.fake_vendor.rgb_mode_read_payload_hex = "01000004aabbcc000000"
+        try:
+            state = self.backend.get_rgb(device)
+            self.assertEqual(state["mode"], "spectrum")
+            self.assertEqual(state["color"], "aabbcc")
+            self.assertFalse(state["mode_inferred"])
+            self.assertEqual(state["read_confidence"]["mode"], "verified")
+        finally:
+            self.fake_vendor.rgb_mode_read_payload_hex = None
+
+    def test_rgb_spectrum_write_when_supported_by_model(self):
+        device = self.backend.detect()[0]
+        state = self.backend.set_rgb(device, mode="spectrum", brightness=60, color=None)
+        self.assertEqual(state["mode"], "spectrum")
+        self.assertEqual(self.fake_vendor.rgb_mode_selector, 0x08)
 
     def test_button_mapping_supports_scroll_and_keyboard_actions(self):
         device = self.backend.detect()[0]

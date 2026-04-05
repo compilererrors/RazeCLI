@@ -39,15 +39,28 @@ DEFAULT_DPI_READ_KEYS = (
     "0b840300",
     "0b840301",
 )
-DEFAULT_DPI_WRITE_KEYS = ("0b040100", "0b040101", "0b040000", "0b040001")
-# Fast path: merge only these two reads (full list is slow on real BLE). Override with
-# RAZECLI_BLE_DPI_READ_SCAN_ALL_KEYS=1 when debugging alternate 0x84 families.
+DEFAULT_DPI_WRITE_KEYS = ("0b040100", "0b040101", "0b040300", "0b040301", "0b040000", "0b040001")
+# Fast path: merge these reads (full list is slow on real BLE). On DA V2 Pro BT, the
+# 0x0300 read family often holds the active onboard-bank table while 0x0100/0x0101 can
+# expose a shorter or stale slice — merging only [:2] keys caused 2-stage reads to win
+# over 4-stage tables after profile-bank switches. Override with
+# RAZECLI_BLE_DPI_READ_SCAN_ALL_KEYS=1 when debugging other 0x84 families.
 DPI_STAGE_BLE_READ_MERGE_KEYS: frozenset[bytes] = frozenset(
-    {bytes.fromhex("0b840100"), bytes.fromhex("0b840101")}
+    {
+        bytes.fromhex("0b840100"),
+        bytes.fromhex("0b840101"),
+        bytes.fromhex("0b840300"),
+        bytes.fromhex("0b840301"),
+    }
 )
-# Mirror writes to both; some firmware paths only apply wheel-DPI cycling from the second key.
+# Mirror writes to the same varstore families so edits stick for the active bank.
 DPI_STAGE_BLE_WRITE_MIRROR_KEYS: frozenset[bytes] = frozenset(
-    {bytes.fromhex("0b040100"), bytes.fromhex("0b040101")}
+    {
+        bytes.fromhex("0b040100"),
+        bytes.fromhex("0b040101"),
+        bytes.fromhex("0b040300"),
+        bytes.fromhex("0b040301"),
+    }
 )
 DEFAULT_POLL_READ_KEYS = ("00850001", "00850000", "00850100", "0b850100", "0b850000")
 DEFAULT_POLL_WRITE_KEYS = ("00050001", "00050000", "00050100", "0b050100", "0b050000")
@@ -88,7 +101,9 @@ RGB_MODE_SELECTOR_PAYLOADS: Dict[str, bytes] = {
     "breathing-random": bytes([0x02, 0x00, 0x00, 0x00]),
 }
 RGB_MODE_BY_SELECTOR_CODE: Dict[int, str] = {
+    # First byte of legacy 1-byte / u32 mode selector readback.
     0x02: "breathing-random",
+    0x04: "spectrum",  # MATRIX_EFFECT_SPECTRUM / classic on some firmware
     0x08: "spectrum",
 }
 
@@ -494,8 +509,6 @@ class MacOSBleBackend(Backend):
         if MacOSBleBackend._env_flag("RAZECLI_BLE_DPI_READ_SCAN_ALL_KEYS", default=False):
             return full
         merged = [key for key in full if key in DPI_STAGE_BLE_READ_MERGE_KEYS]
-        if len(merged) >= 2:
-            return merged[:2]
         if merged:
             return merged
         return full[: min(2, len(full))]
@@ -505,8 +518,6 @@ class MacOSBleBackend(Backend):
         if MacOSBleBackend._env_flag("RAZECLI_BLE_DPI_WRITE_ALL_KEYS", default=False):
             return full
         mirror = [key for key in full if key in DPI_STAGE_BLE_WRITE_MIRROR_KEYS]
-        if len(mirror) >= 2:
-            return mirror[:2]
         if mirror:
             return mirror
         return full[: min(2, len(full))]
@@ -828,6 +839,37 @@ class MacOSBleBackend(Backend):
             b = int(payload[2])
             return f"{r:02x}{g:02x}{b:02x}"
         return None
+
+    @staticmethod
+    def _rgb_mode_color_from_1083_zone_payload(
+        payload: bytes,
+        *,
+        brightness_percent: int,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Parse 10-byte ``10:83`` zone state (OpenSnek V3 Pro–class BLE).
+
+        Layout: ``[zone][0][0][effect][R][G][B][pad...]`` — effect at index 3 matches
+        OpenRazer matrix-style ids (spectrum=0x04, breathing=0x03, static=0x06, …).
+        """
+        if len(payload) < 10:
+            return None, None
+        try:
+            effect = int(payload[3])
+            r, g, b = int(payload[4]), int(payload[5]), int(payload[6])
+        except (IndexError, ValueError):
+            return None, None
+        if any(component < 0 or component > 255 for component in (r, g, b)):
+            return None, None
+        color = f"{r:02x}{g:02x}{b:02x}"
+        if effect in (0x04, 0x08):
+            return "spectrum", color
+        if effect in (0x02, 0x03):
+            return "breathing-single", color
+        if effect in (0x00, 0x01, 0x06):
+            if int(brightness_percent) <= 0:
+                return "off", color
+            return "static", color
+        return None, None
 
     @staticmethod
     def _rgb_mode_from_selector_payload(payload: bytes, *, brightness_percent: int) -> Optional[str]:
@@ -2092,21 +2134,47 @@ class MacOSBleBackend(Backend):
                 color_hex = "00ff00"
                 color_confidence = "inferred-default"
 
+        # ``10830000`` read returns either a 1-byte legacy selector or a 10-byte V3 Pro–class
+        # zone block (OpenSnek). Skipping it hid real modes (e.g. spectrum). Opt out only if the
+        # read causes problems on your mouse: RAZECLI_BLE_RGB_SKIP_MODE_READ=1.
         selector_mode: Optional[str] = None
         mode_selector_code: Optional[int] = None
-        try:
-            mode_result = self._vendor_call(device=device, key=KEY_RGB_MODE_READ)
-            if not self._vendor_decode_is_success(mode_result):
-                mode_result = {}
-            mode_payload = self._decode_payload_bytes(mode_result, key=KEY_RGB_MODE_READ)
-            if mode_payload:
-                mode_selector_code = int(mode_payload[0])
-            selector_mode = self._rgb_mode_from_selector_payload(
-                mode_payload,
-                brightness_percent=int(brightness_percent),
-            )
-        except Exception:
-            selector_mode = None
+        if not MacOSBleBackend._env_flag("RAZECLI_BLE_RGB_SKIP_MODE_READ", default=False):
+            try:
+                mode_result = self._vendor_call(device=device, key=KEY_RGB_MODE_READ)
+                if not self._vendor_decode_is_success(mode_result):
+                    mode_result = {}
+                mode_payload = self._decode_payload_bytes(mode_result, key=KEY_RGB_MODE_READ)
+                if mode_payload:
+                    zone_mode, zone_color = MacOSBleBackend._rgb_mode_color_from_1083_zone_payload(
+                        mode_payload,
+                        brightness_percent=int(brightness_percent),
+                    )
+                    if zone_mode:
+                        selector_mode = zone_mode
+                        try:
+                            mode_selector_code = int(mode_payload[3])
+                        except (IndexError, ValueError):
+                            mode_selector_code = None
+                        if zone_color:
+                            # Frame read is a single instant; for animated modes prefer the zone snapshot.
+                            prefer_zone_color = color_confidence != "verified" or zone_mode in (
+                                "spectrum",
+                                "breathing",
+                                "breathing-single",
+                                "breathing-random",
+                            )
+                            if prefer_zone_color:
+                                color_hex = zone_color
+                                color_confidence = "verified"
+                    else:
+                        mode_selector_code = int(mode_payload[0])
+                        selector_mode = self._rgb_mode_from_selector_payload(
+                            mode_payload,
+                            brightness_percent=int(brightness_percent),
+                        )
+            except Exception:
+                selector_mode = None
 
         cached_mode = str(handle.get("ble_rgb_mode") or "").strip().lower()
         mode_inferred = False

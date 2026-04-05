@@ -23,6 +23,7 @@ from razecli.ble.constants import (
     DEFAULT_RAZER_BT_SERVICE_UUID,
     DEFAULT_RAZER_BT_WRITE_CHAR_UUID,
 )
+from razecli.ble.sync_runner import run_ble_sync
 from razecli.errors import BackendUnavailableError, RazeCliError
 
 _CB_DELEGATE_CLASS: Optional[type] = None
@@ -938,7 +939,7 @@ async def _probe_services_async(
 
 
 def scan_ble_devices(timeout: float = 8.0) -> List[Dict[str, Any]]:
-    return asyncio.run(_scan_devices_async(timeout=timeout))
+    return run_ble_sync(_scan_devices_async(timeout=timeout))
 
 
 def probe_ble_services(
@@ -948,7 +949,7 @@ def probe_ble_services(
     timeout: float,
     read_values: bool = False,
 ) -> Dict[str, Any]:
-    return asyncio.run(
+    return run_ble_sync(
         _probe_services_async(
             address=address,
             name_query=name_query,

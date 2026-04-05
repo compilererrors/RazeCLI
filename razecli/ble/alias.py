@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict
 
 from razecli.ble.alias_store import (
@@ -14,6 +13,7 @@ from razecli.ble.alias_store import (
 )
 from razecli.ble.common import _is_mac_like_address
 from razecli.ble.discovery import _auto_resolve_corebluetooth_address, _candidate_preview
+from razecli.ble.sync_runner import run_ble_sync
 from razecli.errors import RazeCliError
 
 
@@ -46,5 +46,4 @@ async def _ble_alias_resolve_async(*, mac_address: str, timeout: float) -> Dict[
 
 
 def ble_alias_resolve(*, mac_address: str, timeout: float = 8.0) -> Dict[str, Any]:
-    return asyncio.run(_ble_alias_resolve_async(mac_address=mac_address, timeout=float(timeout)))
-
+    return run_ble_sync(_ble_alias_resolve_async(mac_address=mac_address, timeout=float(timeout)))

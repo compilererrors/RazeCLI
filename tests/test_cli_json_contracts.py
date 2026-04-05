@@ -11,6 +11,7 @@ from razecli.cli_battery import handle_battery
 from razecli.cli_button_mapping import handle_button_mapping
 from razecli.cli_devices import handle_devices
 from razecli.cli_rgb import handle_rgb
+from razecli.errors import RazeCliError
 from razecli.feature_scaffolds import set_rgb_scaffold
 from razecli.types import DetectedDevice
 
@@ -36,6 +37,12 @@ class _FakeHardwareBackend(_FakeBackend):
             "brightness": 65,
             "color": "112233",
             "modes_supported": ["off", "static", "breathing", "spectrum"],
+            "read_confidence": {
+                "overall": "mixed",
+                "brightness": "verified",
+                "color": "inferred-cache",
+                "mode": "inferred",
+            },
         }
         self._mapping = {
             "left_click": "mouse:left",
@@ -44,6 +51,11 @@ class _FakeHardwareBackend(_FakeBackend):
             "side_1": "mouse:back",
             "side_2": "mouse:forward",
             "dpi_cycle": "dpi:cycle",
+        }
+        self._mapping_confidence = {
+            "overall": "mixed",
+            "verified_buttons": ["left_click", "right_click", "middle_click"],
+            "inferred_buttons": ["side_1", "side_2", "dpi_cycle"],
         }
 
     def get_rgb(self, _device):
@@ -56,6 +68,21 @@ class _FakeHardwareBackend(_FakeBackend):
         if color is not None:
             self._rgb["color"] = str(color).lower().lstrip("#")
         return dict(self._rgb)
+
+    def get_button_mapping(self, _device):
+        return {
+            "mapping": dict(self._mapping),
+            "buttons_supported": list(self._mapping.keys()),
+            "actions_suggested": [
+                "mouse:left",
+                "mouse:right",
+                "mouse:middle",
+                "mouse:back",
+                "mouse:forward",
+                "dpi:cycle",
+            ],
+            "read_confidence": dict(self._mapping_confidence),
+        }
 
     def list_button_mapping_actions(self, _device):
         return {
@@ -284,6 +311,174 @@ class CliJsonContractTest(unittest.TestCase):
             cli_ble_mod.ble_vendor_transceive = original_vendor
             cli_ble_mod.ble_alias_resolve = original_alias_resolve
 
+    def test_ble_rgb_probe_json_contract(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        cli_ble_mod.ble_vendor_transceive = lambda **kwargs: (
+            {"vendor_decode": {"status": "success", "status_code": 2, "payload_hex": "99"}}
+            if bytes(kwargs.get("key") or b"").hex() == "10850101"
+            else (
+                {"vendor_decode": {"status": "success", "status_code": 2, "payload_hex": "040000000000ff00"}}
+                if bytes(kwargs.get("key") or b"").hex() == "10840000"
+                else {"vendor_decode": {"status": "success", "status_code": 2, "payload_hex": "02"}}
+            )
+        )
+        args = argparse.Namespace(
+            ble_command="rgb-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            brightness_key=["10850101"],
+            frame_key=["10840000"],
+            mode_key=["10830000"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["decoded"]["brightness_percent"], 60)
+            self.assertEqual(payload["decoded"]["color"], "00ff00")
+            self.assertEqual(payload["decoded"]["mode"], "breathing")
+            self.assertEqual(payload["selected_keys"]["brightness"], "10850101")
+            self.assertEqual(payload["selected_keys"]["frame"], "10840000")
+            self.assertEqual(payload["selected_keys"]["mode"], "10830000")
+            self.assertEqual(len(payload["results"]), 3)
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_rgb_probe_reports_unsupported_on_parameter_error(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {
+            "vendor_decode": {"status": "parameter-error", "status_code": 5, "payload_hex": ""}
+        }
+        args = argparse.Namespace(
+            ble_command="rgb-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            brightness_key=["10850101"],
+            frame_key=["10840000"],
+            mode_key=["10830000"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "unsupported")
+            self.assertIsNone(payload["decoded"]["brightness_percent"])
+            self.assertIsNone(payload["decoded"]["color"])
+            self.assertIsNone(payload["decoded"]["mode"])
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_rgb_probe_does_not_decode_payload_when_status_is_error(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+
+        def _vendor(**kwargs):
+            key_hex = bytes(kwargs.get("key") or b"").hex()
+            if key_hex == "10850100":
+                return {"vendor_decode": {"status": "error", "status_code": 3, "payload_hex": "04"}}
+            if key_hex == "10840000":
+                return {"vendor_decode": {"status": "error", "status_code": 3, "payload_hex": "040000000000ff00"}}
+            return {"vendor_decode": {"status": "error", "status_code": 3, "payload_hex": "02"}}
+
+        cli_ble_mod.ble_vendor_transceive = _vendor
+        args = argparse.Namespace(
+            ble_command="rgb-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            brightness_key=["10850100"],
+            frame_key=["10840000"],
+            mode_key=["10830000"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "unsupported")
+            self.assertIsNone(payload["decoded"]["brightness_percent"])
+            self.assertIsNone(payload["decoded"]["color"])
+            self.assertIsNone(payload["decoded"]["mode"])
+            self.assertEqual(payload["decoded"]["mode_selector"], 2)
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_button_probe_json_contract(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+
+        cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {
+            "vendor_decode": {
+                "status": "success",
+                "status_code": 2,
+                "payload_hex": "04000101010104040000000000000000",
+            }
+        }
+        args = argparse.Namespace(
+            ble_command="button-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=["08840104"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["decoded"]["mapping"]["side_1"], "mouse:back")
+            self.assertEqual(payload["selected_keys"]["side_1"], "08840104")
+            self.assertEqual(len(payload["results"]), 1)
+            self.assertEqual(payload["results"][0]["payload_len"], 16)
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_button_probe_reports_unsupported_on_parameter_error(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+        cli_ble_mod.ble_vendor_transceive = lambda **_kwargs: {
+            "vendor_decode": {"status": "parameter-error", "status_code": 5, "payload_hex": ""}
+        }
+        args = argparse.Namespace(
+            ble_command="button-probe",
+            address="AABBCCDD-0011-2233-4455-66778899AABB",
+            name="DA V2 Pro",
+            timeout=5.0,
+            response_timeout=1.0,
+            attempts=1,
+            key=["08840104"],
+            json=True,
+        )
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli_ble_mod.handle_ble(args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "unsupported")
+            self.assertEqual(payload["decoded"]["mapping"], {})
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
     def test_ble_bank_probe_json_contract(self):
         original_vendor = cli_ble_mod.ble_vendor_transceive
         original_alias_resolve = cli_ble_mod.ble_alias_resolve
@@ -364,6 +559,7 @@ class CliJsonContractTest(unittest.TestCase):
                 payload = json.loads(buf.getvalue())
                 self.assertEqual(payload["status"], "ok")
                 self.assertIn("snapshot", payload)
+                self.assertTrue(payload["snapshot"].get("saved"))
                 self.assertEqual(payload["snapshot"]["path"], snapshot_path)
                 self.assertEqual(payload["snapshot"]["count"], 1)
                 self.assertEqual(payload["snapshot"]["label"], "green-led-bank")
@@ -373,6 +569,44 @@ class CliJsonContractTest(unittest.TestCase):
                 self.assertIn("snapshots", stored)
                 self.assertEqual(len(stored["snapshots"]), 1)
                 self.assertEqual(stored["snapshots"][0]["label"], "green-led-bank")
+        finally:
+            cli_ble_mod.ble_vendor_transceive = original_vendor
+
+    def test_ble_bank_commands_reject_unicode_ellipsis_address(self):
+        with self.assertRaises(RazeCliError) as ctx:
+            cli_ble_mod._require_ble_mac_address_for_bank_commands("\u2026")
+        self.assertIn("placeholder", str(ctx.exception).lower())
+
+    def test_ble_bank_snapshot_skips_store_on_transport_failure(self):
+        original_vendor = cli_ble_mod.ble_vendor_transceive
+
+        def _fail(**_kwargs):
+            raise RuntimeError("Device with address X was not found")
+
+        cli_ble_mod.ble_vendor_transceive = _fail
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                snapshot_path = str(Path(tmp_dir) / "bank_snapshots.json")
+                args = argparse.Namespace(
+                    ble_command="bank-snapshot",
+                    address="02:11:22:33:44:55",
+                    name="DA V2 Pro",
+                    timeout=5.0,
+                    response_timeout=1.0,
+                    attempts=1,
+                    key=["0b840100"],
+                    include_write_keys=False,
+                    label="should-not-save",
+                    path=snapshot_path,
+                    json=True,
+                )
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = cli_ble_mod.handle_ble(args)
+                self.assertEqual(rc, 0)
+                payload = json.loads(buf.getvalue())
+                self.assertFalse(payload["snapshot"].get("saved"))
+                self.assertFalse(Path(snapshot_path).exists())
         finally:
             cli_ble_mod.ble_vendor_transceive = original_vendor
 
@@ -616,6 +850,7 @@ class CliJsonContractTest(unittest.TestCase):
         self.assertEqual(payload["rgb"]["brightness"], 65)
         self.assertEqual(payload["rgb"]["color"], "112233")
         self.assertEqual(payload["rgb"]["hardware_apply"], "read")
+        self.assertEqual(payload["rgb"]["read_confidence"]["overall"], "mixed")
 
     def test_rgb_get_prefers_local_mode_when_hardware_mode_is_inferred(self):
         device = DetectedDevice(
@@ -684,6 +919,34 @@ class CliJsonContractTest(unittest.TestCase):
         self.assertIn("side_1", payload["buttons_supported"])
         self.assertIn("dpi:cycle", payload["actions_suggested"])
         self.assertEqual(payload["hardware_apply"], "read")
+
+    def test_button_mapping_get_prefers_hardware_state_when_available(self):
+        device = DetectedDevice(
+            identifier="macos-ble:1532:008E:bt:ABC",
+            name="DA V2 Pro",
+            vendor_id=0x1532,
+            product_id=0x008E,
+            backend="macos-ble",
+            model_id="deathadder-v2-pro",
+            capabilities={"dpi", "button-mapping"},
+        )
+        service = _FakeService(device, backend=_FakeHardwareBackend())
+        args = argparse.Namespace(
+            button_mapping_command="get",
+            store_file=None,
+            model=None,
+            device=None,
+            json=True,
+        )
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = handle_button_mapping(service, args)
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["button_mapping"]["mapping"]["side_1"], "mouse:back")
+        self.assertEqual(payload["button_mapping"]["hardware_apply"], "read")
+        self.assertEqual(payload["button_mapping"]["read_confidence"]["overall"], "mixed")
 
     def test_rgb_menu_starts_tui_with_rgb_editor(self):
         device = DetectedDevice(

@@ -3,6 +3,7 @@
 ## Goals
 
 - Achieve stable read/write for `dpi`, `dpi-stages`, `poll-rate`, and `battery` in BT mode on macOS.
+- Achieve stable read/write for `rgb` and `button-mapping` in BT mode on macOS.
 - Keep USB/dongle (`007C`/`007D`) behavior isolated from BT experiments.
 - Document command mapping by transport and onboard profile bank.
 
@@ -11,6 +12,16 @@
 - `007C` (USB) and `007D` (2.4G dongle) work via `rawhid`.
 - `008E` (Bluetooth) is discoverable, but HID feature reports may fail (`send_feature_report failed`).
 - The bottom LED/DPI button can switch onboard banks; the same LED color does not always mean the same absolute DPI across transports.
+- BLE vendor GATT path is now used for `dpi`, `dpi-stages`, `battery`, RGB probing, and button probing on DA V2 Pro.
+
+## What Is Already Mapped
+
+- `ble bank-probe`, `ble bank-snapshot`, and `ble bank-compare` are available for profile-bank analysis.
+- `ble bank-probe --deep` now probes extra `0x84`-family keys and reports signature groups.
+- Default (non-deep) bank probe/snapshot also tries `0b840101` alongside `0b840100`; shallow `0b840000` alone often yields no DPI payload. **Identical `primary_bank_signature` for two underside banks means the decoded DPI stage tables we read match** — use different per-bank DPI (e.g. `dpi set` / stage edits) or `--deep` if banks still look the same.
+- `ble rgb-probe` reports per-key decode status and current mode selector decoding.
+- `ble button-probe` decodes standard mouse button slots (`left/right/middle/side_1/side_2`) when payload matches known layouts.
+- CLI/TUI RGB and button-mapping flows now expose hardware/local scope plus read confidence (`verified`, `mixed`, `inferred`).
 
 ## Terminology (User-facing vs RE terms)
 
@@ -48,7 +59,10 @@
      - report-id (`0x00`, `0x02`)
      - transaction-id (`0x3F`, `0x1F`, and others)
      - timing/retry characteristics for reads.
-6. Promote mapping when verified
+6. Probe RGB/button mappings
+   - Use `ble rgb-probe` to verify mode/brightness/frame key behavior.
+   - Use `ble button-probe` before/after writes to confirm payload deltas.
+7. Promote mapping when verified
    - Move `008E` from experimental to stable backend profile.
    - Add regression tests with recorded response fixtures.
 
@@ -121,6 +135,30 @@ RAZECLI_BLE_POLL_SUPPORTED_MODELS=basilisk-x-hyperspeed \
 razecli --backend macos-ble poll-rate get --model basilisk-x-hyperspeed
 ```
 
+RGB probing:
+
+```bash
+razecli --json ble rgb-probe --address F6:F2:0D:4E:D9:30 --attempts 2
+razecli --json ble rgb-probe --address F6:F2:0D:4E:D9:30 --attempts 1 --mode-key 10830000
+```
+
+Button probing:
+
+```bash
+razecli --json ble button-probe --address F6:F2:0D:4E:D9:30 --attempts 2
+razecli --json ble button-probe --address F6:F2:0D:4E:D9:30 --key 08840104 --attempts 2
+```
+
+Onboard profile bank capture:
+
+```bash
+razecli --json ble bank-probe --address F6:F2:0D:4E:D9:30 --attempts 2
+razecli --json ble bank-probe --address F6:F2:0D:4E:D9:30 --attempts 2 --deep
+razecli --json ble bank-snapshot --address F6:F2:0D:4E:D9:30 --attempts 2 --label bank-a
+razecli --json ble bank-snapshot --address F6:F2:0D:4E:D9:30 --attempts 2 --label bank-b
+razecli --json ble bank-compare --label-a bank-a --label-b bank-b
+```
+
 ## Capture Matrix (Fill During RE)
 
 - Device: DeathAdder V2 Pro
@@ -174,3 +212,5 @@ razecli --backend macos-ble poll-rate get --model basilisk-x-hyperspeed
 - `macos-ble` handles 20/20 repeated `dpi get` calls without timeout/failure.
 - `dpi-stages set` and `activate` are deterministic after reconnect.
 - No unintended reset to `400/1000` within the same bank after write/reconnect.
+- RGB read confidence is `verified` for mode/brightness/color on DA V2 Pro (no inferred fallbacks in normal flow).
+- Button mapping read confidence is `verified` for all exposed slots on DA V2 Pro, including DPI-cycle slot behavior.

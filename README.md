@@ -4,7 +4,7 @@ RazeCLI exists to make on-the-fly Razer mouse changes simple over USB, 2.4G dong
 
 The goal is a fast, lightweight, open source tool that avoids heavy vendor software installs.
 Current focus is practical settings: DPI, DPI stages, poll-rate, and battery where supported.
-RGB and button mapping now run hardware-first on supported backends (currently experimental on `macos-ble` for DA V2 Pro), with local fallback persistence when unsupported.
+RGB and button mapping now run hardware-first on supported backends (currently experimental on `macos-ble` for DA V2 Pro), with confidence-aware read state and local fallback persistence when unsupported.
 
 ![RazeCLI TUI screenshot](assets/tuiScreenShot.png)
 ![RazeCLI CLI screenshot](assets/cliScreenShot.png)
@@ -32,6 +32,49 @@ Supported models:
 - Poll-rate over Bluetooth may require per-device key overrides (`RAZECLI_BLE_POLL_READ_KEYS` / `RAZECLI_BLE_POLL_WRITE_KEYS`).
 - Protocol framing follows known Razer packet structure, with additional BLE reverse-engineering work.
 - Most real-hardware validation has been done on DeathAdder V2 Pro. Other models may need key/path tuning; see `Adding BT Support for More Razer Models`.
+
+## Backend Capability Overview
+
+Status legend:
+- `verified`: repeatedly validated on supported transport/model.
+- `partial`: implemented but still model/firmware or host dependent.
+- `fallback`: local scaffold only (no reliable hardware read/write yet).
+
+### `rawhid` (`007C`/`007D`)
+- Detect/list devices: `verified`
+- DPI get/set: `verified`
+- DPI levels (`dpi-stages`): `verified`
+- Poll-rate get/set: `verified`
+- Battery get: `verified`
+- RGB get/set: `partial`
+- Button mapping get/set: `partial`
+
+### `macos-ble` (`008E`, DA V2 Pro focus)
+- Detect/list devices: `verified`
+- DPI get/set: `verified`
+- DPI levels (`dpi-stages`): `partial` (bank/profile dependent)
+- Poll-rate get/set: `partial` (model-gated; DA V2 Pro BT intentionally disabled)
+- Battery get: `partial` (BLE session quality dependent)
+- RGB get/set: `partial` (mode selector better mapped than brightness/color read)
+- Button mapping get/set: `partial` (main mouse buttons verified; some slots inferred)
+
+### `hidapi`
+- Detect/list devices: `partial`
+- DPI get/set: `fallback`
+- DPI levels (`dpi-stages`): `fallback`
+- Poll-rate get/set: `fallback`
+- Battery get: `fallback`
+- RGB get/set: `fallback`
+- Button mapping get/set: `fallback`
+
+### `macos-profiler`
+- Detect/list devices: `verified`
+- DPI get/set: `fallback`
+- DPI levels (`dpi-stages`): `fallback`
+- Poll-rate get/set: `fallback`
+- Battery get: `fallback`
+- RGB get/set: `fallback`
+- Button mapping get/set: `fallback`
 
 ## Features
 
@@ -64,26 +107,26 @@ Supported models:
   Next local priority: add retry/backoff and host-specific fallback paths.
 
 - **RGB**
-  Available now: experimental DA V2 Pro hardware path on `macos-ble` (`off/static/breathing/spectrum` + brightness/color), with local fallback persistence.
-  Missing for production: broader cross-model mode validation and rawhid parity.
-  Next local priority: stabilize additional RGB modes and add `rawhid` parity.
+  Available now: experimental DA V2 Pro hardware path on `macos-ble` (`off/static/breathing/breathing-single/breathing-random/spectrum`) plus CLI/TUI editing and presets, with local fallback persistence.
+  Missing for production: stable brightness/color readback mapping on BLE across reconnects and broader cross-model validation.
+  Next local priority: promote verified BLE RGB read keys and add `rawhid` parity.
 
 - **Button mapping**
-  Available now: experimental DA V2 Pro hardware path on `macos-ble` for mouse actions (`mouse:*` incl. scroll), `dpi:cycle`, keyboard actions, and turbo variants, with local fallback persistence.
-  Missing for production: full action taxonomy parity on more models and rawhid parity.
-  Next local priority: broaden action coverage and add `rawhid` support.
+  Available now: experimental DA V2 Pro hardware path on `macos-ble` for mouse actions (`mouse:*` incl. scroll), `dpi:cycle`, keyboard actions, and turbo variants, with read-confidence reporting (`verified`/`mixed`/`inferred`) and local fallback persistence.
+  Missing for production: explicit decode coverage for all button slots/actions across more models plus `rawhid` parity.
+  Next local priority: complete slot/action decode map and expand model fixtures.
 
 - **RGB/button UX**
-  Available now: CLI + TUI editors (`g` for RGB with presets, `b` for button-mapping table/editor).
-  Missing for production: full physical-button capture reliability across macOS hosts and broader cross-model validation.
-  Next local priority: strengthen capture-assisted mapping and add more preset/mode templates.
+  Available now: CLI + TUI editors (`g` for RGB with presets, `b` for button-mapping table/editor), lazy-loading state in main view, and confidence display in JSON output.
+  Missing for production: fully reliable physical-button capture on all macOS permission setups and broader cross-model UX validation.
+  Next local priority: harden capture-assist fallback paths and keep dialogs fast on unstable BLE hosts.
 
 ## Next Local Priorities
 
-1. Add DA V2 Pro RGB hardware parity in `rawhid` (after current `macos-ble` path).
-2. Add DA V2 Pro button-mapping hardware parity in `rawhid` (after current `macos-ble` path).
-3. Improve TUI RGB/button workflows (presets, validation hints, optional capture-assisted mapping).
-4. Extend model coverage only after DA V2 Pro paths are validated with repeatable tests.
+1. Finalize BLE RGB read mapping (mode + brightness + color) so `rgb get` can be treated as fully verified on DA V2 Pro.
+2. Add DA V2 Pro RGB/button parity paths in `rawhid` where transport permits.
+3. Expand bank/profile-safe DPI workflows and fixtures for reconnect/profile-switch scenarios.
+4. Extend model coverage after DA V2 Pro paths are validated with repeatable fixtures and hardware runs.
 
 ## Architecture
 
@@ -288,6 +331,8 @@ RGB (hardware-first when backend supports it, local fallback otherwise):
 razecli rgb get
 razecli rgb set --mode static --brightness 55 --color 00ff88
 razecli rgb set --mode breathing --brightness 45 --color ff5500
+razecli rgb set --mode breathing-single --brightness 45 --color ff5500
+razecli rgb set --mode breathing-random --brightness 45 --color ff5500
 razecli rgb set --mode spectrum --brightness 60
 ```
 
@@ -419,6 +464,23 @@ RAZECLI_BLE_POLL_FORCE=1 RAZECLI_BLE_POLL_CAP=1 razecli --backend macos-ble poll
 razecli --json ble poll-probe --address F6:F2:0D:4E:D9:30 --attempts 2
 ```
 
+Experimental BLE RGB/button/profile-bank probes (reverse engineering tools):
+
+```bash
+# RGB key probing + decode hints (mode/brightness/frame)
+razecli --json ble rgb-probe --address F6:F2:0D:4E:D9:30 --attempts 2
+
+# Button slot probing + decoded action when known
+razecli --json ble button-probe --address F6:F2:0D:4E:D9:30 --attempts 2
+
+# Profile-bank probing and snapshots
+razecli --json ble bank-probe --address F6:F2:0D:4E:D9:30 --attempts 2
+razecli --json ble bank-probe --address F6:F2:0D:4E:D9:30 --attempts 2 --deep
+razecli --json ble bank-snapshot --address F6:F2:0D:4E:D9:30 --attempts 2 --label bank-a
+razecli --json ble bank-snapshot --address F6:F2:0D:4E:D9:30 --attempts 2 --label bank-b
+razecli --json ble bank-compare --label-a bank-a --label-b bank-b
+```
+
 ## Safe vs Legacy Stage Activation
 
 - Default behavior (`safe`):
@@ -470,12 +532,12 @@ Recommended workflow when adding a new BT model:
 - `q`: quit
 - `r`: refresh device list
 - `up/down` or `k/j`: select device
-- `+` / `-`: change DPI in steps of 100
+- `+` / `-`: change DPI by configured keyboard step (`n` -> "Set keyboard +/- adjustment step")
 - `d`: enter custom DPI X/Y
 - `g`: open RGB editor dialog (manual edit + apply/save/delete presets)
 - `b`: open button-mapping table/editor dialog
 - `s`: switch to next DPI stage (on devices with `dpi-stages`)
-- `n`: set DPI stage count (1-5) on selected device
+- `n`: open DPI levels editor (count, stage ladder with increment, preset load/save/delete)
 - `p`: cycle poll-rate
 
 Inside the button-mapping dialog:
@@ -497,7 +559,7 @@ Install with `python -m pip install pynput` and grant macOS Accessibility/Input 
 Example:
 
 ```python
-from razecli.models.base import ModelSpec
+from razecli.models.base import ModelSpec, RawHidPidSpec
 
 MODEL = ModelSpec(
     slug="viper-v2-pro",
@@ -508,11 +570,32 @@ MODEL = ModelSpec(
     supported_poll_rates=(125, 500, 1000),
     ble_poll_rate_supported=False,
     ble_supported_poll_rates=(),
+    ble_supported_rgb_modes=("off", "static"),
+    ble_endpoint_product_ids=(0x00A6,),
+    ble_endpoint_experimental=True,
+    ble_multi_profile_table_limited=False,
+    onboard_profile_bank_switch=False,
+    rawhid_mirror_product_ids=(0x00A5,),
+    rawhid_pid_specs=(
+        RawHidPidSpec(
+            product_id=0x00A5,
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            experimental=True,
+        ),
+    ),
+    rawhid_transport_priority=(0x00A5, 0x00A6),
+    cli_default_target=False,
+    ble_button_decode_layouts=("razer-v1",),
 )
 ```
 
 `ble_poll_rate_supported` and `ble_supported_poll_rates` are the model-level switches for BT poll-rate rollout.
 Set them only after validated hardware captures for that specific model/firmware.
+BLE endpoint behavior and transport-mirror behavior should also be declared in `ModelSpec`, not hardcoded in controllers/backends.
+CLI/TUI default target selection and rawhid transport preference should also come from `ModelSpec`
+(`cli_default_target`, `rawhid_transport_priority`) so adding a new model does not require branch logic edits.
+Rawhid support profiles should be declared in `rawhid_pid_specs` and BLE button decoding behavior in
+`ble_button_decode_layouts` to avoid per-model hardcoded branches in backends.
 
 ## Additional Notes
 
@@ -523,8 +606,8 @@ Set them only after validated hardware captures for that specific model/firmware
   - In practice: first select onboard profile with the bottom button, then edit DPI levels for that profile.
 - Backend auto-priority is `rawhid` > `macos-ble` > `hidapi` > `macos-profiler`.
 - If multiple devices match, pass `--device`.
-- `rawhid` collapses transport variants by default (priority: USB > dongle > BT). Use `--all-transports` to see each endpoint.
-- `tui` defaults to `deathadder-v2-pro` filter. Use `razecli tui --all-models` to view everything detected.
+- `rawhid` collapses transport variants by default using model-declared `rawhid_transport_priority`. Use `--all-transports` to see each endpoint.
+- `tui` defaults to the model marked with `cli_default_target=True`. Use `razecli tui --all-models` to view everything detected.
 - `macos-profiler` is detect-only and cannot write DPI, DPI stages, poll-rate, or battery.
 - `macos-ble` targets BT reverse engineering for `008E` and reuses Razer packet framing over vendor GATT.
 - DeathAdder V2 Pro supports up to 5 DPI stages per active onboard profile bank.

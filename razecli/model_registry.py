@@ -3,7 +3,7 @@
 import importlib
 import pkgutil
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import razecli.models
 from razecli.models.base import ModelSpec
@@ -61,3 +61,22 @@ class ModelRegistry:
 
     def iter(self) -> Iterable[ModelSpec]:
         return self._models.values()
+
+    def default_cli_model_slug(self) -> Optional[str]:
+        defaults = [model for model in self.list() if bool(getattr(model, "cli_default_target", False))]
+        if defaults:
+            return defaults[0].slug
+        models = self.list()
+        return models[0].slug if models else None
+
+    def ble_endpoint_product_ids(self) -> Tuple[int, ...]:
+        pids = set()
+        for model in self.iter():
+            for item in tuple(getattr(model, "ble_endpoint_product_ids", ()) or ()):
+                try:
+                    pid = int(item)
+                except Exception:
+                    continue
+                if 0 <= pid <= 0xFFFF:
+                    pids.add(pid)
+        return tuple(sorted(pids))

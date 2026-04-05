@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from razecli.backends.base import Backend
 from razecli.errors import BackendUnavailableError, CapabilityUnsupportedError
+from razecli.model_registry import ModelRegistry
 from razecli.types import DetectedDevice
 
 RAZER_VENDOR_ID = 0x1532
@@ -31,51 +32,55 @@ class PidSupportProfile:
     tx_candidates: Tuple[int, ...] = (0x3F, 0x1F, 0xFF)
     report_id_candidates: Tuple[int, ...] = (0x00,)
     experimental: bool = False
+    prefer_vendor_usage_page: bool = False
 
 
-# Profiles are based on observed packet behavior and project validation data.
-# Non-DA V2 Pro profiles are enabled as experimental until validated on hardware.
-PID_PROFILES: Dict[int, PidSupportProfile] = {
-    # DeathAdder V2 Pro
-    0x007C: PidSupportProfile(
-        product_id=0x007C,
-        name_hint="Razer DeathAdder V2 Pro",
-        capabilities=frozenset({"dpi", "dpi-stages", "poll-rate", "battery"}),
-    ),
-    0x007D: PidSupportProfile(
-        product_id=0x007D,
-        name_hint="Razer DeathAdder V2 Pro",
-        capabilities=frozenset({"dpi", "dpi-stages", "poll-rate", "battery"}),
-    ),
-    # Bluetooth endpoint observed on macOS
-    0x008E: PidSupportProfile(
-        product_id=0x008E,
-        name_hint="Razer DeathAdder V2 Pro",
-        capabilities=frozenset({"dpi", "dpi-stages", "poll-rate", "battery"}),
-        tx_candidates=(0x3F, 0x1F, 0xFF),
-        report_id_candidates=(0x00, 0x02),
-        experimental=True,
-    ),
-    # Additional low-risk profiles
-    0x0084: PidSupportProfile(
-        product_id=0x0084,
-        name_hint="Razer DeathAdder V2",
-        capabilities=frozenset({"dpi", "poll-rate"}),
-        experimental=True,
-    ),
-    0x008C: PidSupportProfile(
-        product_id=0x008C,
-        name_hint="Razer DeathAdder V2 Mini",
-        capabilities=frozenset({"dpi", "dpi-stages", "poll-rate"}),
-        experimental=True,
-    ),
-    0x0083: PidSupportProfile(
-        product_id=0x0083,
-        name_hint="Razer Basilisk X HyperSpeed",
-        capabilities=frozenset({"dpi", "dpi-stages", "poll-rate", "battery"}),
-        experimental=True,
-    ),
-}
+def _build_pid_profiles_from_models() -> Dict[int, PidSupportProfile]:
+    registry = ModelRegistry.load()
+    profiles: Dict[int, PidSupportProfile] = {}
+    for model in registry.iter():
+        for raw_spec in tuple(getattr(model, "rawhid_pid_specs", ()) or ()):
+            try:
+                product_id = int(getattr(raw_spec, "product_id", -1))
+            except Exception:
+                continue
+            if product_id < 0 or product_id > 0xFFFF:
+                continue
+
+            capabilities = frozenset(
+                str(value).strip().lower()
+                for value in tuple(getattr(raw_spec, "capabilities", ()) or ())
+                if str(value).strip()
+            )
+            if not capabilities:
+                continue
+
+            tx_candidates = tuple(
+                int(value) & 0xFF
+                for value in tuple(getattr(raw_spec, "tx_candidates", (0x3F, 0x1F, 0xFF)) or ())
+            ) or (0x3F, 0x1F, 0xFF)
+            report_id_candidates = tuple(
+                int(value) & 0xFF
+                for value in tuple(getattr(raw_spec, "report_id_candidates", (0x00,)) or ())
+            ) or (0x00,)
+            name_hint = str(getattr(raw_spec, "name_hint", "") or "").strip() or str(model.name).strip()
+            experimental = bool(getattr(raw_spec, "experimental", False))
+            prefer_vendor_usage_page = bool(getattr(raw_spec, "prefer_vendor_usage_page", False))
+
+            profiles[product_id] = PidSupportProfile(
+                product_id=product_id,
+                name_hint=name_hint,
+                capabilities=capabilities,
+                tx_candidates=tx_candidates,
+                report_id_candidates=report_id_candidates,
+                experimental=experimental,
+                prefer_vendor_usage_page=prefer_vendor_usage_page,
+            )
+    return profiles
+
+
+# Rawhid support is model-driven via ModelSpec.rawhid_pid_specs.
+PID_PROFILES: Dict[int, PidSupportProfile] = _build_pid_profiles_from_models()
 
 POLL_RATE_TO_CODE = {
     1000: 0x01,
@@ -390,10 +395,11 @@ class RawHidBackend(Backend):
                 score -= 30
             if entry.get("usage_page") in (0x0001, 0xFF00):
                 score -= 5
-            if device.product_id == 0x008E:
+            profile = self._profile_for_pid(device.product_id)
+            if profile and profile.prefer_vendor_usage_page:
                 usage_page = int(entry.get("usage_page", 0) or 0)
                 usage = int(entry.get("usage", 0) or 0)
-                # Bluetooth endpoint often has both generic mouse and vendor HID nodes.
+                # Some Bluetooth endpoints expose both generic mouse and vendor HID nodes.
                 # Prefer vendor page candidates for feature-report traffic.
                 if usage_page == 0xFF00:
                     score -= 30

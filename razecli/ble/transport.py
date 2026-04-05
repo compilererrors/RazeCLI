@@ -20,6 +20,7 @@ from razecli.ble.constants import (
     DEFAULT_RAZER_BT_SERVICE_UUID,
     DEFAULT_RAZER_BT_WRITE_CHAR_UUID,
 )
+from razecli.ble.sync_runner import run_ble_sync
 from razecli.ble.discovery import (
     _auto_resolve_corebluetooth_address,
     _candidate_preview,
@@ -507,7 +508,9 @@ async def _ble_vendor_transceive_async(
         extra_write_payloads=chunks,
         response_timeout=response_timeout,
         enable_notify=notify_enabled,
-        read_after_write=True,
+        # Vendor framing is notification-driven; extra read requests can race with
+        # CoreBluetooth callbacks on some macOS hosts and cause InvalidStateError.
+        read_after_write=False,
         write_with_response=write_with_response,
     )
     result["vendor_request"] = {
@@ -535,7 +538,7 @@ def ble_raw_transceive(
     read_after_write: bool = True,
     write_with_response: bool = True,
 ) -> Dict[str, Any]:
-    return asyncio.run(
+    return run_ble_sync(
         _ble_raw_transceive_async(
             address=address,
             name_query=name_query,
@@ -567,7 +570,7 @@ def ble_vendor_transceive(
     write_char_uuid: str = DEFAULT_RAZER_BT_WRITE_CHAR_UUID,
     read_char_uuids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    return asyncio.run(
+    return run_ble_sync(
         _ble_vendor_transceive_async(
             address=address,
             name_query=name_query,

@@ -8,13 +8,6 @@ from typing import Callable, Iterable, Optional, Tuple
 from razecli.device_service import DeviceService
 from razecli.types import DetectedDevice
 
-# Mirror only between stable, validated transport endpoints.
-# Bluetooth endpoint (008E) is intentionally excluded here.
-RAW_HID_MIRROR_PID_MAP: dict[str, frozenset[int]] = {
-    "deathadder-v2-pro": frozenset({0x007C, 0x007D}),
-}
-
-
 def transport_mirror_enabled() -> bool:
     value = os.getenv("RAZECLI_TRANSPORT_MIRROR", "").strip().lower()
     return value in {"1", "true", "yes", "on"}
@@ -24,6 +17,30 @@ def _is_experimental(device: DetectedDevice) -> bool:
     handle = device.backend_handle if isinstance(device.backend_handle, dict) else {}
     profile = handle.get("profile")
     return bool(getattr(profile, "experimental", False))
+
+
+def _mirror_pid_set(service: DeviceService, model_id: Optional[str]) -> frozenset[int]:
+    if not model_id:
+        return frozenset()
+    registry = getattr(service, "registry", None)
+    if registry is None or not hasattr(registry, "get"):
+        return frozenset()
+    try:
+        model = registry.get(model_id)
+    except Exception:
+        model = None
+    if model is None:
+        return frozenset()
+    raw = tuple(getattr(model, "rawhid_mirror_product_ids", ()) or ())
+    values: set[int] = set()
+    for item in raw:
+        try:
+            pid = int(item)
+        except Exception:
+            continue
+        if 0 <= pid <= 0xFFFF:
+            values.add(pid)
+    return frozenset(values)
 
 
 def iter_transport_mirror_targets(
@@ -36,7 +53,7 @@ def iter_transport_mirror_targets(
     if source.backend != "rawhid" or not model_id:
         return ()
 
-    pid_set = RAW_HID_MIRROR_PID_MAP.get(model_id)
+    pid_set = _mirror_pid_set(service, model_id)
     if not pid_set or source.product_id not in pid_set:
         return ()
 

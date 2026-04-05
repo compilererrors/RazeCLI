@@ -6,7 +6,6 @@ endpoints (currently validated for DA V2 Pro `0x008E`).
 
 from __future__ import annotations
 
-import asyncio
 import os
 import platform
 import sys
@@ -16,20 +15,40 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from razecli.backends.base import Backend
 from razecli.backends.macos_profiler_backend import MacOSProfilerBackend
 from razecli.backends.rawhid_backend import RawHidBackend
+from razecli.ble.sync_runner import run_ble_sync
 from razecli.errors import BackendUnavailableError, CapabilityUnsupportedError
 from razecli.model_registry import ModelRegistry
 from razecli.types import DetectedDevice
 
 RAZER_VENDOR_ID = 0x1532
-DEFAULT_BLE_PRODUCT_IDS = frozenset({0x008E, 0x0083})
+# Empty by default; primary source is ModelSpec.ble_endpoint_product_ids.
+DEFAULT_BLE_PRODUCT_IDS = frozenset()
 BLE_CAPABILITIES = frozenset({"battery", "dpi", "dpi-stages", "rgb", "button-mapping"})
 
 KEY_BATTERY_RAW_READ = bytes.fromhex("05810001")
 KEY_BATTERY_STATUS_READ = bytes.fromhex("05800001")
 KEY_DPI_STAGES_READ = bytes.fromhex("0B840100")
 KEY_DPI_STAGES_WRITE = bytes.fromhex("0B040100")
-DEFAULT_DPI_READ_KEYS = ("0b840100", "0b840000")
-DEFAULT_DPI_WRITE_KEYS = ("0b040100", "0b040000")
+DEFAULT_DPI_READ_KEYS = (
+    # Prefer the writable/readback family first to keep TUI/CLI edits stable.
+    "0b840100",
+    "0b840101",
+    "0b840000",
+    "0b840001",
+    # Additional observed families (read-only/variant on some firmwares).
+    "0b840300",
+    "0b840301",
+)
+DEFAULT_DPI_WRITE_KEYS = ("0b040100", "0b040101", "0b040000", "0b040001")
+# Fast path: merge only these two reads (full list is slow on real BLE). Override with
+# RAZECLI_BLE_DPI_READ_SCAN_ALL_KEYS=1 when debugging alternate 0x84 families.
+DPI_STAGE_BLE_READ_MERGE_KEYS: frozenset[bytes] = frozenset(
+    {bytes.fromhex("0b840100"), bytes.fromhex("0b840101")}
+)
+# Mirror writes to both; some firmware paths only apply wheel-DPI cycling from the second key.
+DPI_STAGE_BLE_WRITE_MIRROR_KEYS: frozenset[bytes] = frozenset(
+    {bytes.fromhex("0b040100"), bytes.fromhex("0b040101")}
+)
 DEFAULT_POLL_READ_KEYS = ("00850001", "00850000", "00850100", "0b850100", "0b850000")
 DEFAULT_POLL_WRITE_KEYS = ("00050001", "00050000", "00050100", "0b050100", "0b050000")
 # Model-level BLE poll-rate allowlist.
@@ -40,6 +59,7 @@ DEFAULT_RGB_BRIGHTNESS_READ_KEYS = ("10850101", "10850100")
 DEFAULT_RGB_BRIGHTNESS_WRITE_KEYS = ("10050100", "10050101")
 KEY_RGB_FRAME_READ = bytes.fromhex("10840000")
 KEY_RGB_FRAME_WRITE = bytes.fromhex("10040000")
+KEY_RGB_MODE_READ = bytes.fromhex("10830000")
 KEY_RGB_MODE_WRITE = bytes.fromhex("10030000")
 PRIMARY_VENDOR_READ_CHAR_UUID = "52401525-f97c-7f90-0e7f-6c6f4e36db1c"
 BATTERY_LEVEL_CHAR_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
@@ -52,13 +72,24 @@ CODE_TO_POLL_RATE = {value: key for key, value in POLL_RATE_TO_CODE.items()}
 MAX_DPI_STAGES = 5
 MIN_PLAUSIBLE_DPI = 100
 MAX_PLAUSIBLE_DPI = 30000
-DEFAULT_NAME_QUERY = "DA V2 Pro"
-RGB_MODES = ("off", "static", "breathing", "spectrum")
+DEFAULT_BLE_NAME_QUERY = "Razer"
+RGB_MODES = ("off", "static", "breathing", "breathing-single", "breathing-random", "spectrum")
 RGB_MODE_SELECTOR_PAYLOADS: Dict[str, bytes] = {
+    # Selector 0x03 appears to be the non-animated family:
+    # off when brightness is 0, static when brightness > 0.
+    "off": bytes([0x03, 0x00, 0x00, 0x00]),
+    "static": bytes([0x03, 0x00, 0x00, 0x00]),
     # Validated in BLE captures for legacy mode selector.
     "spectrum": bytes([0x08, 0x00, 0x00, 0x00]),
-    # Observed effect-family selector used by BLE lighting pipelines.
+    # Legacy selector for breathing family. We send full 10-byte payloads for
+    # breathing-single/random, but keep this for compatibility.
     "breathing": bytes([0x02, 0x00, 0x00, 0x00]),
+    "breathing-single": bytes([0x02, 0x00, 0x00, 0x00]),
+    "breathing-random": bytes([0x02, 0x00, 0x00, 0x00]),
+}
+RGB_MODE_BY_SELECTOR_CODE: Dict[int, str] = {
+    0x02: "breathing-random",
+    0x08: "spectrum",
 }
 
 BUTTON_SLOT_BY_NAME = {
@@ -82,7 +113,8 @@ MOUSE_ACTION_ID_BY_NAME: Dict[str, int] = {
     "mouse:scroll-right": 0x69,
 }
 MOUSE_ACTION_NAME_BY_ID: Dict[int, str] = {value: key for key, value in MOUSE_ACTION_ID_BY_NAME.items()}
-DEFAULT_BUTTON_TURBO_RATE = 0x008E
+# Packet field default used for turbo actions (decimal 142, hex 0x008E).
+DEFAULT_BUTTON_TURBO_RATE = 142
 
 DEFAULT_BUTTON_MAPPING = {
     "left_click": "mouse:left",
@@ -110,6 +142,15 @@ BUTTON_ACTIONS = (
     "disabled",
 )
 
+BLE_BUTTON_DECODE_LAYOUT_RAZER_V1 = "razer-v1"
+BLE_BUTTON_DECODE_LAYOUT_COMPACT_16 = "compact-16"
+BLE_BUTTON_DECODE_LAYOUT_SLOT_BYTE6 = "slot-byte6"
+BLE_BUTTON_DECODE_LAYOUTS = (
+    BLE_BUTTON_DECODE_LAYOUT_RAZER_V1,
+    BLE_BUTTON_DECODE_LAYOUT_COMPACT_16,
+    BLE_BUTTON_DECODE_LAYOUT_SLOT_BYTE6,
+)
+
 
 class MacOSBleBackend(Backend):
     name = "macos-ble"
@@ -117,8 +158,8 @@ class MacOSBleBackend(Backend):
     def __init__(self) -> None:
         self.last_error = None
         self._supported = platform.system() == "Darwin"
-        self._ble_product_ids = self._load_product_ids()
         self._model_registry = ModelRegistry.load()
+        self._ble_product_ids = self._load_product_ids()
         self._poll_capability_enabled = self._env_flag("RAZECLI_BLE_POLL_CAP", default=False)
         self._ble_poll_supported_models = self._load_ble_poll_supported_models()
         self._poll_unavailable_targets: Set[str] = set()
@@ -186,7 +227,40 @@ class MacOSBleBackend(Backend):
         from_env = self._parse_pid_list(str(os.getenv("RAZECLI_BLE_PRODUCT_IDS", "")).strip())
         if from_env:
             return set(from_env)
-        return set(DEFAULT_BLE_PRODUCT_IDS)
+        default_ids: Set[int] = set(DEFAULT_BLE_PRODUCT_IDS)
+        for model in self._model_registry.iter():
+            raw = tuple(getattr(model, "ble_endpoint_product_ids", ()) or ())
+            for item in raw:
+                try:
+                    pid = int(item)
+                except Exception:
+                    continue
+                if 0 <= pid <= 0xFFFF:
+                    default_ids.add(pid)
+        return default_ids
+
+    def _model_spec(self, model_id: Optional[str]):
+        slug = str(model_id or "").strip().lower()
+        if not slug:
+            return None
+        return self._model_registry.get(slug)
+
+    def _model_ble_multi_profile_table_limited(self, model_id: Optional[str]) -> bool:
+        model = self._model_spec(model_id)
+        return bool(model and getattr(model, "ble_multi_profile_table_limited", False))
+
+    def _model_ble_button_decode_layouts(self, model_id: Optional[str]) -> Tuple[str, ...]:
+        model = self._model_spec(model_id)
+        raw_layouts = tuple(getattr(model, "ble_button_decode_layouts", ()) or ()) if model else ()
+        normalized: List[str] = []
+        for raw in raw_layouts:
+            layout = str(raw).strip().lower()
+            if layout in BLE_BUTTON_DECODE_LAYOUTS and layout not in normalized:
+                normalized.append(layout)
+        # Conservative default for unknown/new models: try strict legacy layout first.
+        if not normalized:
+            return (BLE_BUTTON_DECODE_LAYOUT_RAZER_V1,)
+        return tuple(normalized)
 
     @staticmethod
     def _load_ble_poll_supported_models() -> Set[str]:
@@ -231,6 +305,11 @@ class MacOSBleBackend(Backend):
             normalized.insert(0, "off")
         if "static" not in normalized:
             normalized.append("static")
+        if "breathing" in normalized:
+            if "breathing-single" not in normalized:
+                normalized.append("breathing-single")
+            if "breathing-random" not in normalized:
+                normalized.append("breathing-random")
         return tuple(mode for mode in normalized if mode in RGB_MODES)
 
     def _detect_capabilities(
@@ -410,6 +489,28 @@ class MacOSBleBackend(Backend):
                 return ordered
         return keys
 
+    def _dpi_read_keys_for_stage_probe(self, handle: Dict[str, object]) -> List[bytes]:
+        full = self._dpi_read_keys(handle)
+        if MacOSBleBackend._env_flag("RAZECLI_BLE_DPI_READ_SCAN_ALL_KEYS", default=False):
+            return full
+        merged = [key for key in full if key in DPI_STAGE_BLE_READ_MERGE_KEYS]
+        if len(merged) >= 2:
+            return merged[:2]
+        if merged:
+            return merged
+        return full[: min(2, len(full))]
+
+    def _dpi_write_keys_for_stage_mirror(self, handle: Dict[str, object]) -> List[bytes]:
+        full = self._dpi_write_keys(handle)
+        if MacOSBleBackend._env_flag("RAZECLI_BLE_DPI_WRITE_ALL_KEYS", default=False):
+            return full
+        mirror = [key for key in full if key in DPI_STAGE_BLE_WRITE_MIRROR_KEYS]
+        if len(mirror) >= 2:
+            return mirror[:2]
+        if mirror:
+            return mirror
+        return full[: min(2, len(full))]
+
     def _rgb_brightness_read_keys(self, handle: Dict[str, object]) -> List[bytes]:
         keys = self._parse_hex_key_list(
             str(os.getenv("RAZECLI_BLE_RGB_READ_KEYS", "")).strip(),
@@ -577,12 +678,10 @@ class MacOSBleBackend(Backend):
         )
 
     @staticmethod
-    def _decode_ble_button_payload(slot: int, payload: bytes) -> Optional[str]:
+    def _decode_ble_button_payload_razer_v1(slot: int, payload: bytes) -> Optional[str]:
         if len(payload) < 10:
             return None
-        if int(payload[0]) != 0x01:
-            return None
-        if int(payload[1]) != int(slot):
+        if int(payload[0]) != 0x01 or int(payload[1]) != int(slot):
             return None
 
         action_class = int(payload[3])
@@ -614,8 +713,102 @@ class MacOSBleBackend(Backend):
         return None
 
     @staticmethod
+    def _decode_ble_button_payload_compact_16(slot: int, payload: bytes) -> Optional[str]:
+        # Compact 16-byte layout observed on DA V2 Pro BLE reads.
+        # Example side_1/back: 04000101010104040000000000000000
+        # action id is byte 6, slot mirrors at byte 7.
+        if len(payload) < 8:
+            return None
+        if int(payload[0]) != int(slot):
+            return None
+        if len(payload) >= 8 and int(payload[7]) != int(slot):
+            return None
+        action_id = int(payload[6])
+        if action_id == 0x00:
+            return "disabled"
+        return MOUSE_ACTION_NAME_BY_ID.get(action_id)
+
+    @staticmethod
+    def _decode_ble_button_payload_slot_byte6(slot: int, payload: bytes) -> Optional[str]:
+        if len(payload) < 8 or int(payload[0]) != int(slot):
+            return None
+        action_id = int(payload[6])
+        if action_id == 0x00:
+            return "disabled"
+        return MOUSE_ACTION_NAME_BY_ID.get(action_id)
+
+    @staticmethod
+    def _decode_ble_button_payload(
+        slot: int,
+        payload: bytes,
+        *,
+        layouts: Optional[Sequence[str]] = None,
+    ) -> Optional[str]:
+        ordered = tuple(str(item).strip().lower() for item in (layouts or BLE_BUTTON_DECODE_LAYOUTS) if str(item).strip())
+        for layout in ordered:
+            if layout == BLE_BUTTON_DECODE_LAYOUT_RAZER_V1:
+                decoded = MacOSBleBackend._decode_ble_button_payload_razer_v1(slot, payload)
+            elif layout == BLE_BUTTON_DECODE_LAYOUT_COMPACT_16:
+                decoded = MacOSBleBackend._decode_ble_button_payload_compact_16(slot, payload)
+            elif layout == BLE_BUTTON_DECODE_LAYOUT_SLOT_BYTE6:
+                decoded = MacOSBleBackend._decode_ble_button_payload_slot_byte6(slot, payload)
+            else:
+                continue
+            if decoded is not None:
+                return decoded
+        return None
+
+    @staticmethod
     def _rgb_mode_selector_payload(mode: str) -> Optional[bytes]:
         return RGB_MODE_SELECTOR_PAYLOADS.get(str(mode).strip().lower())
+
+    @staticmethod
+    def _normalize_rgb_mode_for_write(mode: str) -> str:
+        mode_value = str(mode).strip().lower()
+        if mode_value == "breathing":
+            # Default breathing to single-color behavior.
+            return "breathing-single"
+        return mode_value
+
+    @staticmethod
+    def _rgb_mode_supported_over_ble(*, requested_mode: str, supported_modes: Sequence[str]) -> bool:
+        mode_value = str(requested_mode).strip().lower()
+        supported = {str(item).strip().lower() for item in supported_modes if str(item).strip()}
+        if mode_value in supported:
+            return True
+        if mode_value == "breathing" and (
+            "breathing-single" in supported or "breathing-random" in supported
+        ):
+            return True
+        if mode_value in {"breathing-single", "breathing-random"} and "breathing" in supported:
+            return True
+        return False
+
+    @staticmethod
+    def _rgb_mode_write_payload(*, mode: str, color_hex: str) -> Optional[bytes]:
+        mode_value = MacOSBleBackend._normalize_rgb_mode_for_write(mode)
+        if mode_value == "breathing-single":
+            rgb = bytes.fromhex(color_hex)
+            # Matches observed 10-byte readback family on 10830000:
+            # [mode=0x02, variant=0x01, 0x00, color_count=0x01, R,G,B, 0x00,0x00,0x00]
+            return bytes([0x02, 0x01, 0x00, 0x01, rgb[0], rgb[1], rgb[2], 0x00, 0x00, 0x00])
+        if mode_value == "breathing-random":
+            rgb = bytes.fromhex(color_hex)
+            # Keep seed color in payload while selecting random breathing profile.
+            return bytes([0x02, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2], 0x00, 0x00])
+        return MacOSBleBackend._rgb_mode_selector_payload(mode_value)
+
+    @staticmethod
+    def _rgb_modes_equivalent_for_verify(*, expected: str, actual: str) -> bool:
+        expected_mode = str(expected).strip().lower()
+        actual_mode = str(actual).strip().lower()
+        if expected_mode == actual_mode:
+            return True
+        if expected_mode in {"breathing-single", "breathing-random"} and actual_mode == "breathing":
+            return True
+        if expected_mode == "breathing" and actual_mode in {"breathing-single", "breathing-random"}:
+            return True
+        return False
 
     @staticmethod
     def _rgb_color_from_payload(payload: bytes) -> Optional[str]:
@@ -624,12 +817,67 @@ class MacOSBleBackend(Backend):
             g = int(payload[6])
             b = int(payload[7])
             return f"{r:02x}{g:02x}{b:02x}"
-        if len(payload) >= 4:
+        if len(payload) == 4 and int(payload[0]) == 0x04:
             r = int(payload[1])
             g = int(payload[2])
             b = int(payload[3])
             return f"{r:02x}{g:02x}{b:02x}"
+        if len(payload) == 3:
+            r = int(payload[0])
+            g = int(payload[1])
+            b = int(payload[2])
+            return f"{r:02x}{g:02x}{b:02x}"
         return None
+
+    @staticmethod
+    def _rgb_mode_from_selector_payload(payload: bytes, *, brightness_percent: int) -> Optional[str]:
+        if not payload:
+            return None
+        first = int(payload[0])
+        if first in {0x00, 0x03}:
+            return "off" if int(brightness_percent) <= 0 else "static"
+        if first == 0x02:
+            if len(payload) >= 2:
+                variant = int(payload[1])
+                if variant == 0x01:
+                    return "breathing-single"
+                if variant == 0x00:
+                    return "breathing-random"
+            return "breathing"
+        mapped = RGB_MODE_BY_SELECTOR_CODE.get(first)
+        if mapped is not None:
+            return str(mapped)
+        return None
+
+    @staticmethod
+    def _vendor_decode_is_success(result: Dict[str, object]) -> bool:
+        vendor = result.get("vendor_decode")
+        if not isinstance(vendor, dict):
+            return True
+        status_raw = str(vendor.get("status") or "").strip().lower()
+        status_code_raw = vendor.get("status_code")
+        status_code: Optional[int] = None
+        try:
+            status_code = int(status_code_raw) if status_code_raw is not None else None
+        except Exception:
+            status_code = None
+        if status_code is not None:
+            return int(status_code) == 2
+        if status_raw:
+            return status_raw == "success"
+        return True
+
+    @staticmethod
+    def _read_confidence_overall(levels: Sequence[str]) -> str:
+        normalized = [str(level).strip().lower() for level in levels if str(level).strip()]
+        if not normalized:
+            return "unknown"
+        verified_count = sum(level == "verified" for level in normalized)
+        if verified_count == len(normalized):
+            return "verified"
+        if verified_count > 0:
+            return "mixed"
+        return "inferred"
 
     @staticmethod
     def _decode_poll_rate_payload(payload: bytes) -> Optional[int]:
@@ -899,10 +1147,10 @@ class MacOSBleBackend(Backend):
         handle = self._device_handle(device)
         bt_address = str(handle.get("bt_address") or "").strip()
         if self._is_mac_address(bt_address):
-            return bt_address, device.name or DEFAULT_NAME_QUERY
+            return bt_address, device.name or DEFAULT_BLE_NAME_QUERY
         if self._is_mac_address(device.serial):
-            return str(device.serial), device.name or DEFAULT_NAME_QUERY
-        return None, device.name or device.model_name or DEFAULT_NAME_QUERY
+            return str(device.serial), device.name or DEFAULT_BLE_NAME_QUERY
+        return None, device.name or device.model_name or DEFAULT_BLE_NAME_QUERY
 
     @staticmethod
     def _vendor_path_from_handle(handle: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -1009,6 +1257,52 @@ class MacOSBleBackend(Backend):
             return _tx(discovered)
 
     @staticmethod
+    def _select_best_dpi_stages_payload(
+        result: Dict[str, object], key: bytes, vendor_payload: bytes
+    ) -> bytes:
+        """Pick vendor/notify/read candidate that parses to the richest stage table.
+
+        Some firmwares put a compact single-stage snapshot in ``payload_hex`` while the
+        full profile list arrives only via notify chunks or a primary GATT read row.
+        Preferring the parse with the **most stages** keeps TUI refresh and dpi-stages
+        in sync with on-device cycling after writes that pin alternate 0x0B84 families.
+        """
+        _ = key
+        candidates: List[bytes] = []
+        if vendor_payload:
+            candidates.append(vendor_payload)
+        notify_inferred = MacOSBleBackend._infer_payload_from_notify_rows(result)
+        if notify_inferred:
+            candidates.append(notify_inferred)
+        read_inferred = MacOSBleBackend._infer_payload_from_read_rows(result)
+        if read_inferred:
+            candidates.append(read_inferred)
+
+        best_blob: Optional[bytes] = None
+        best_score: Optional[Tuple[int, int]] = None
+
+        for cand in candidates:
+            try:
+                _active, stages, _ids, _marker = MacOSBleBackend._parse_stages_payload(cand)
+            except Exception:
+                continue
+            score = (len(stages), len(cand))
+            if best_score is None or score > best_score:
+                best_score = score
+                best_blob = cand
+
+        if best_blob is not None:
+            return best_blob
+
+        if len(vendor_payload) >= 2:
+            return vendor_payload
+        if notify_inferred is not None:
+            return notify_inferred
+        if read_inferred is not None:
+            return read_inferred
+        return vendor_payload
+
+    @staticmethod
     def _decode_payload_bytes(result: Dict[str, object], *, key: bytes) -> bytes:
         vendor = result.get("vendor_decode")
         if not isinstance(vendor, dict):
@@ -1023,6 +1317,9 @@ class MacOSBleBackend(Backend):
                     f"Invalid payload_hex in vendor response for key {key.hex()}: {payload_hex}"
                 ) from exc
 
+        if len(key) == 4 and int(key[0]) == 0x0B and int(key[1]) == 0x84:
+            return MacOSBleBackend._select_best_dpi_stages_payload(result, key, payload)
+
         if len(payload) >= 2:
             return payload
 
@@ -1031,7 +1328,8 @@ class MacOSBleBackend(Backend):
             return notify_inferred
 
         # Read-row fallback is only valid for DPI stage responses.
-        if key == KEY_DPI_STAGES_READ:
+        # Accept all known 0x0B84 read families, not only 0B840100.
+        if len(key) == 4 and int(key[0]) == 0x0B and int(key[1]) == 0x84:
             inferred = MacOSBleBackend._infer_payload_from_read_rows(result)
             if inferred is not None:
                 return inferred
@@ -1343,10 +1641,14 @@ class MacOSBleBackend(Backend):
         attempts = self._dpi_read_attempts()
         retry_delay = self._dpi_read_retry_delay()
         last_exc: Optional[Exception] = None
-        read_keys = self._dpi_read_keys(handle)
+        read_keys = self._dpi_read_keys_for_stage_probe(handle)
         diagnostics: List[str] = []
 
         for attempt in range(attempts):
+            best_tuple: Optional[Tuple[int, List[Tuple[int, int]], List[int], int]] = None
+            best_key_hex: Optional[str] = None
+            best_score: Optional[Tuple[int, int]] = None
+
             for key in read_keys:
                 try:
                     result = self._vendor_call(device=device, key=key)
@@ -1354,16 +1656,24 @@ class MacOSBleBackend(Backend):
                     preview = payload[:16].hex() if payload else "-"
                     diagnostics.append(f"{key.hex()}:len={len(payload)}:hex={preview}")
                     active_stage, stages, stage_ids, marker = self._parse_stages_payload(payload)
-                    handle["ble_dpi_read_key"] = key.hex()
-                    handle["ble_stage_ids"] = list(stage_ids)
-                    handle["ble_stage_marker"] = int(marker)
-                    handle["ble_cached_stages"] = [[int(x), int(y)] for (x, y) in stages]
-                    handle["ble_cached_active_stage"] = int(active_stage)
-                    return active_stage, stages, stage_ids, marker
+                    score = (len(stages), len(payload))
+                    if best_score is None or score > best_score:
+                        best_score = score
+                        best_key_hex = key.hex()
+                        best_tuple = (active_stage, stages, stage_ids, marker)
                 except Exception as exc:
                     diagnostics.append(f"{key.hex()}:err={exc}")
                     last_exc = exc
                     continue
+
+            if best_tuple is not None and best_key_hex is not None:
+                active_stage, stages, stage_ids, marker = best_tuple
+                handle["ble_dpi_read_key"] = best_key_hex
+                handle["ble_stage_ids"] = list(stage_ids)
+                handle["ble_stage_marker"] = int(marker)
+                handle["ble_cached_stages"] = [[int(x), int(y)] for (x, y) in stages]
+                handle["ble_cached_active_stage"] = int(active_stage)
+                return active_stage, stages, stage_ids, marker
 
             # On repeated parse failures, force GATT path rediscovery in case pinned path is stale.
             self._clear_vendor_path(handle)
@@ -1422,23 +1732,6 @@ class MacOSBleBackend(Backend):
     def set_dpi_stages(self, device: DetectedDevice, active_stage: int, stages: Sequence[Tuple[int, int]]) -> None:
         stages_list = list(stages)
         handle = self._device_handle(device)
-        if int(device.product_id) == 0x008E and len(stages_list) > 1:
-            current_count = 0
-            cached = handle.get("ble_cached_stages")
-            if isinstance(cached, list):
-                current_count = len(cached)
-            if current_count <= 0:
-                try:
-                    _active_cur, current_stages, _stage_ids_cur, _marker_cur = self._read_dpi_stages_with_metadata(device)
-                    current_count = len(list(current_stages))
-                except Exception:
-                    current_count = 0
-            if current_count <= 1:
-                raise CapabilityUnsupportedError(
-                    "Device currently reports a single BLE DPI profile. "
-                    "Adding extra profiles is not mapped reliably on 1532:008E over BLE yet. "
-                    "Use USB/2.4 mode to create multi-profile tables, then return to BLE."
-                )
 
         stage_ids_hint = handle.get("ble_stage_ids")
         marker = int(handle.get("ble_stage_marker") or 0)
@@ -1449,15 +1742,25 @@ class MacOSBleBackend(Backend):
                 stage_ids_hint = [idx + 1 for idx in range(len(stages))]
                 marker = 0
 
+        hint_list = [int(value) for value in stage_ids_hint]
+        env_ids = str(os.getenv("RAZECLI_BLE_DPI_STAGE_IDS", "")).strip().lower()
+        if env_ids in {"sequential", "1", "yes", "true"}:
+            hint_list = list(range(1, len(stages_list) + 1))
+        elif len(hint_list) < len(stages_list):
+            # Mixing firmware tokens (e.g. 0x11, 0x22) with appended 3,4,5 breaks multi-stage
+            # tables on some BLE endpoints; match USB-style contiguous slot ids 1..N instead.
+            hint_list = list(range(1, len(stages_list) + 1))
+
         payload = self._build_stages_write_payload(
             active_stage=int(active_stage),
             stages=stages_list,
-            stage_ids_hint=[int(value) for value in stage_ids_hint],
+            stage_ids_hint=hint_list,
             marker=marker,
         )
-        write_keys = self._dpi_write_keys(handle)
+        write_keys = self._dpi_write_keys_for_stage_mirror(handle)
         attempted: List[str] = []
         last_exc: Optional[Exception] = None
+        successes = 0
         for key in write_keys:
             attempted.append(key.hex())
             try:
@@ -1466,20 +1769,24 @@ class MacOSBleBackend(Backend):
                     key=key,
                     value_payload=payload,
                 )
-                handle["ble_dpi_write_key"] = key.hex()
+                successes += 1
+                if successes == 1:
+                    handle["ble_dpi_write_key"] = key.hex()
                 last_exc = None
-                break
             except Exception as exc:
                 last_exc = exc
                 continue
-        if isinstance(last_exc, Exception):
+        if successes == 0:
             raise CapabilityUnsupportedError(
                 f"DPI profile write over BLE failed. Tried keys: {attempted}"
             ) from last_exc
-        handle["ble_stage_ids"] = [int(value) for value in stage_ids_hint][: len(stages_list)]
-        handle["ble_stage_marker"] = int(marker)
-        handle["ble_cached_stages"] = [[int(x), int(y)] for (x, y) in stages_list]
-        handle["ble_cached_active_stage"] = int(active_stage)
+        try:
+            self._read_dpi_stages_with_metadata(device)
+        except Exception:
+            handle["ble_stage_ids"] = hint_list[: len(stages_list)]
+            handle["ble_stage_marker"] = int(marker)
+            handle["ble_cached_stages"] = [[int(x), int(y)] for (x, y) in stages_list]
+            handle["ble_cached_active_stage"] = int(active_stage)
 
     def get_poll_rate(self, device: DetectedDevice) -> int:
         if not self._poll_capability_enabled:
@@ -1689,7 +1996,7 @@ class MacOSBleBackend(Backend):
         address, name_query = self._resolve_target(device)
         timeout = self._backend_timeout()
         try:
-            return asyncio.run(
+            return run_ble_sync(
                 self._read_standard_battery_level_async(
                     address=address,
                     name_query=name_query,
@@ -1737,40 +2044,87 @@ class MacOSBleBackend(Backend):
         read_keys = self._rgb_brightness_read_keys(handle)
 
         brightness_percent: Optional[int] = None
+        brightness_confidence = "inferred"
         for key in read_keys:
             try:
                 result = self._vendor_call(device=device, key=key)
+                if not self._vendor_decode_is_success(result):
+                    continue
                 payload = self._decode_payload_bytes(result, key=key)
             except Exception:
                 continue
             if not payload:
                 continue
             brightness_percent = self._rgb_u8_to_percent(int(payload[0]))
+            brightness_confidence = "verified"
             handle["ble_rgb_read_key"] = key.hex()
             break
 
         if brightness_percent is None:
-            raise CapabilityUnsupportedError("Could not read RGB brightness over BLE")
+            cached_brightness = handle.get("ble_rgb_brightness")
+            try:
+                brightness_percent = max(0, min(100, int(cached_brightness)))
+            except Exception:
+                brightness_percent = 100
+                brightness_confidence = "inferred-default"
+            else:
+                brightness_confidence = "inferred-cache"
 
         color_hex: Optional[str] = None
+        color_confidence = "inferred"
         try:
             frame_result = self._vendor_call(device=device, key=KEY_RGB_FRAME_READ)
+            if not self._vendor_decode_is_success(frame_result):
+                frame_result = {}
             frame_payload = self._decode_payload_bytes(frame_result, key=KEY_RGB_FRAME_READ)
             color_hex = self._rgb_color_from_payload(frame_payload)
+            if color_hex is not None:
+                color_confidence = "verified"
         except Exception:
             color_hex = None
 
         if color_hex is None:
             cached_color = self._normalize_color_hex(str(handle.get("ble_rgb_color") or "").strip() or None)
-            color_hex = cached_color or "00ff00"
+            if cached_color is not None:
+                color_hex = cached_color
+                color_confidence = "inferred-cache"
+            else:
+                color_hex = "00ff00"
+                color_confidence = "inferred-default"
 
+        selector_mode: Optional[str] = None
+        mode_selector_code: Optional[int] = None
+        try:
+            mode_result = self._vendor_call(device=device, key=KEY_RGB_MODE_READ)
+            if not self._vendor_decode_is_success(mode_result):
+                mode_result = {}
+            mode_payload = self._decode_payload_bytes(mode_result, key=KEY_RGB_MODE_READ)
+            if mode_payload:
+                mode_selector_code = int(mode_payload[0])
+            selector_mode = self._rgb_mode_from_selector_payload(
+                mode_payload,
+                brightness_percent=int(brightness_percent),
+            )
+        except Exception:
+            selector_mode = None
+
+        cached_mode = str(handle.get("ble_rgb_mode") or "").strip().lower()
         mode_inferred = False
-        if brightness_percent <= 0:
-            mode = "off"
-        else:
-            cached_mode = str(handle.get("ble_rgb_mode") or "").strip().lower()
+        mode_confidence = "inferred"
+        if selector_mode in RGB_MODES:
+            mode = str(selector_mode)
+            mode_confidence = "verified"
+        elif brightness_percent <= 0:
             if cached_mode in RGB_MODES and cached_mode != "off":
                 mode = cached_mode
+                mode_inferred = True
+            else:
+                mode = "off"
+                mode_inferred = True
+        else:
+            if cached_mode in RGB_MODES and cached_mode != "off":
+                mode = cached_mode
+                mode_inferred = True
             else:
                 # BLE mode-read is not fully mapped on this device profile yet.
                 # Preserve compatibility by returning "static" as a safe fallback,
@@ -1786,10 +2140,21 @@ class MacOSBleBackend(Backend):
             else:
                 mode = str(supported_modes[0] if supported_modes else "off")
             mode_inferred = True
+            mode_confidence = "inferred"
 
         handle["ble_rgb_mode"] = mode
         handle["ble_rgb_color"] = color_hex
         handle["ble_rgb_brightness"] = int(brightness_percent)
+        read_confidence: Dict[str, Any] = {
+            "overall": self._read_confidence_overall(
+                (brightness_confidence, color_confidence, mode_confidence)
+            ),
+            "brightness": brightness_confidence,
+            "color": color_confidence,
+            "mode": mode_confidence,
+        }
+        if mode_selector_code is not None:
+            read_confidence["mode_selector"] = int(mode_selector_code)
 
         return {
             "mode": mode,
@@ -1797,6 +2162,7 @@ class MacOSBleBackend(Backend):
             "brightness": int(brightness_percent),
             "color": color_hex,
             "modes_supported": list(supported_modes),
+            "read_confidence": read_confidence,
         }
 
     def set_rgb(
@@ -1808,16 +2174,18 @@ class MacOSBleBackend(Backend):
         color: Optional[str] = None,
     ) -> Dict[str, Any]:
         handle = self._device_handle(device)
-        mode_value = str(mode).strip().lower()
+        requested_mode = str(mode).strip().lower()
+        mode_value = self._normalize_rgb_mode_for_write(requested_mode)
+        reported_mode = requested_mode if requested_mode == "breathing" else mode_value
         supported_modes = self._model_supported_ble_rgb_modes(device.model_id)
-        if mode_value not in RGB_MODES:
+        if requested_mode not in RGB_MODES:
             raise CapabilityUnsupportedError(
                 f"Unsupported RGB mode '{mode}'. Supported: {', '.join(RGB_MODES)}"
             )
-        if mode_value not in supported_modes:
+        if not self._rgb_mode_supported_over_ble(requested_mode=requested_mode, supported_modes=supported_modes):
             raise CapabilityUnsupportedError(
                 "RGB mode write over Bluetooth is not mapped for this model yet. "
-                f"Requested '{mode_value}'. Supported over BLE: {', '.join(supported_modes)}"
+                f"Requested '{requested_mode}'. Supported over BLE: {', '.join(supported_modes)}"
             )
 
         current: Dict[str, Any] = {}
@@ -1849,44 +2217,51 @@ class MacOSBleBackend(Backend):
         write_ok = False
         for attempt in range(attempts):
             try:
-                if mode_value in {"static", "breathing"}:
+                selector_payload = self._rgb_mode_write_payload(mode=mode_value, color_hex=color_hex)
+                mode_write_ok = False
+
+                if mode_value in {"static", "breathing-single"}:
                     rgb = bytes.fromhex(color_hex)
                     frame_payload = bytes([0x04, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2]])
-                    _ = self._vendor_call(
+                    frame_result = self._vendor_call(
                         device=device,
                         key=KEY_RGB_FRAME_WRITE,
                         value_payload=frame_payload,
                     )
+                    if not self._vendor_decode_is_success(frame_result):
+                        raise CapabilityUnsupportedError("Could not write RGB frame over BLE")
 
-                selector_payload = self._rgb_mode_selector_payload(mode_value)
                 if selector_payload is not None:
-                    _ = self._vendor_call(
+                    mode_result = self._vendor_call(
                         device=device,
                         key=KEY_RGB_MODE_WRITE,
                         value_payload=selector_payload,
                     )
+                    mode_write_ok = self._vendor_decode_is_success(mode_result)
+                    if not mode_write_ok:
+                        raise CapabilityUnsupportedError("Could not write RGB mode selector over BLE")
+                else:
+                    mode_write_ok = True
 
                 wrote_brightness = False
                 brightness_err: Optional[Exception] = None
                 for key in write_keys:
                     try:
-                        _ = self._vendor_call(
+                        brightness_result = self._vendor_call(
                             device=device,
                             key=key,
                             value_payload=bytes([brightness_u8]),
                         )
+                        if not self._vendor_decode_is_success(brightness_result):
+                            continue
                         handle["ble_rgb_write_key"] = key.hex()
                         wrote_brightness = True
                         break
                     except Exception as exc:
                         brightness_err = exc
                         continue
-                if not wrote_brightness:
-                    if isinstance(brightness_err, Exception):
-                        raise CapabilityUnsupportedError("Could not write RGB brightness over BLE") from brightness_err
-                    raise CapabilityUnsupportedError("Could not write RGB brightness over BLE")
 
-                handle["ble_rgb_mode"] = mode_value
+                handle["ble_rgb_mode"] = reported_mode
                 handle["ble_rgb_color"] = color_hex
                 handle["ble_rgb_brightness"] = int(brightness_percent)
 
@@ -1894,18 +2269,36 @@ class MacOSBleBackend(Backend):
                     try:
                         verified = self.get_rgb(device)
                     except Exception as exc:
-                        raise CapabilityUnsupportedError("Could not verify RGB write over BLE") from exc
+                        if mode_write_ok:
+                            verified = {}
+                        else:
+                            raise CapabilityUnsupportedError("Could not verify RGB write over BLE") from exc
 
-                    try:
-                        actual_brightness = int(verified.get("brightness"))
-                    except Exception:
-                        actual_brightness = -1
-                    expected_brightness = int(brightness_percent)
-                    if abs(actual_brightness - expected_brightness) > 2:
-                        raise CapabilityUnsupportedError(
-                            "RGB write verification mismatch over BLE "
-                            f"(expected brightness {expected_brightness}, got {actual_brightness})"
-                        )
+                    read_confidence = verified.get("read_confidence", {}) if isinstance(verified, dict) else {}
+                    mode_confidence = str(read_confidence.get("mode") or "").strip().lower()
+                    if mode_confidence == "verified":
+                        verified_mode = str(verified.get("mode") or "").strip().lower()
+                        if verified_mode and not self._rgb_modes_equivalent_for_verify(
+                            expected=mode_value,
+                            actual=verified_mode,
+                        ):
+                            raise CapabilityUnsupportedError(
+                                "RGB write verification mismatch over BLE "
+                                f"(expected mode {mode_value}, got {verified_mode})"
+                            )
+
+                    brightness_confidence = str(read_confidence.get("brightness") or "").strip().lower()
+                    if wrote_brightness and brightness_confidence == "verified":
+                        try:
+                            actual_brightness = int(verified.get("brightness"))
+                        except Exception:
+                            actual_brightness = -1
+                        expected_brightness = int(brightness_percent)
+                        if abs(actual_brightness - expected_brightness) > 2:
+                            raise CapabilityUnsupportedError(
+                                "RGB write verification mismatch over BLE "
+                                f"(expected brightness {expected_brightness}, got {actual_brightness})"
+                            )
 
                 write_ok = True
                 break
@@ -1924,7 +2317,7 @@ class MacOSBleBackend(Backend):
             raise CapabilityUnsupportedError(f"Could not apply RGB over BLE reliably after {attempts} attempts")
 
         return {
-            "mode": mode_value,
+            "mode": reported_mode,
             "mode_inferred": False,
             "brightness": int(brightness_percent),
             "color": color_hex,
@@ -1933,6 +2326,8 @@ class MacOSBleBackend(Backend):
 
     def get_button_mapping(self, device: DetectedDevice) -> Dict[str, Any]:
         mapping: Dict[str, str] = {}
+        decode_layouts = self._model_ble_button_decode_layouts(device.model_id)
+        verified_buttons: List[str] = []
         for button, slot in BUTTON_SLOT_BY_NAME.items():
             key = bytes([0x08, 0x84, 0x01, int(slot)])
             try:
@@ -1940,20 +2335,32 @@ class MacOSBleBackend(Backend):
                 payload = self._decode_payload_bytes(result, key=key)
             except Exception:
                 continue
-            action = self._decode_ble_button_payload(int(slot), payload)
+            action = self._decode_ble_button_payload(int(slot), payload, layouts=decode_layouts)
             if action:
-                mapping[str(button)] = action
+                button_name = str(button)
+                mapping[button_name] = action
+                verified_buttons.append(button_name)
 
         if not mapping:
             raise CapabilityUnsupportedError("Button mapping read over BLE is not available on this host/device")
 
+        inferred_buttons: List[str] = []
         for button, default_action in DEFAULT_BUTTON_MAPPING.items():
-            mapping.setdefault(button, default_action)
+            if button not in mapping:
+                mapping[button] = default_action
+                inferred_buttons.append(str(button))
+
+        read_confidence = {
+            "overall": "verified" if not inferred_buttons else "mixed",
+            "verified_buttons": sorted(set(verified_buttons)),
+            "inferred_buttons": sorted(set(inferred_buttons)),
+        }
 
         return {
             "mapping": mapping,
             "buttons_supported": list(BUTTON_SLOT_BY_NAME.keys()),
             "actions_suggested": list(BUTTON_ACTIONS),
+            "read_confidence": read_confidence,
         }
 
     def set_button_mapping(
@@ -1983,6 +2390,11 @@ class MacOSBleBackend(Backend):
                 "mapping": mapping,
                 "buttons_supported": list(BUTTON_SLOT_BY_NAME.keys()),
                 "actions_suggested": list(BUTTON_ACTIONS),
+                "read_confidence": {
+                    "overall": "inferred",
+                    "verified_buttons": [],
+                    "inferred_buttons": sorted(BUTTON_SLOT_BY_NAME.keys()),
+                },
             }
 
     def reset_button_mapping(self, device: DetectedDevice) -> Dict[str, Any]:

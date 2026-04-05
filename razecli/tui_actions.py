@@ -8,7 +8,18 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from razecli.dpi_autosync import autosync_enabled, load_autosync_settings, save_autosync_settings
+from razecli.dpi_autosync import (
+    AUTOSYNC_PRESET_PREFIX,
+    autosync_enabled,
+    load_autosync_settings,
+    save_autosync_settings,
+)
+from razecli.dpi_stage_presets import (
+    delete_dpi_stage_preset,
+    list_dpi_stage_presets,
+    load_dpi_stage_preset,
+    save_dpi_stage_preset,
+)
 from razecli.errors import CapabilityUnsupportedError
 from razecli.feature_scaffolds import (
     delete_rgb_preset,
@@ -196,13 +207,56 @@ class TuiActionsMixin:
     def _is_detect_only_backend(device: Optional[DetectedDevice]) -> bool:
         return bool(device and device.backend == "macos-profiler")
 
+    def _model_spec(self, device: Optional[DetectedDevice]):
+        if device is None or not device.model_id:
+            return None
+        service = getattr(self, "service", None)
+        registry = getattr(service, "registry", None)
+        if registry is None or not hasattr(registry, "get"):
+            return None
+        try:
+            return registry.get(device.model_id)
+        except Exception:
+            return None
+
     @staticmethod
-    def _is_bt_008e(device: Optional[DetectedDevice]) -> bool:
-        return bool(
-            device
-            and device.product_id == 0x008E
-            and device.backend in {"rawhid", "macos-ble"}
-        )
+    def _usb_pid_label(device: Optional[DetectedDevice]) -> str:
+        if not device:
+            return "unknown"
+        try:
+            return f"{int(device.vendor_id):04X}:{int(device.product_id):04X}"
+        except Exception:
+            return "unknown"
+
+    def _is_ble_endpoint_device(self, device: Optional[DetectedDevice]) -> bool:
+        if not device or device.backend not in {"rawhid", "macos-ble"}:
+            return False
+        model = self._model_spec(device)
+        if model is None:
+            return False
+        endpoint_ids = tuple(getattr(model, "ble_endpoint_product_ids", ()) or ())
+        try:
+            return int(device.product_id) in {int(pid) for pid in endpoint_ids}
+        except Exception:
+            return False
+
+    def _is_bt_008e(self, device: Optional[DetectedDevice]) -> bool:
+        # Backwards-compatible alias while call sites migrate to generic naming.
+        return self._is_ble_endpoint_device(device)
+
+    def _is_experimental_ble_endpoint(self, device: Optional[DetectedDevice]) -> bool:
+        if not self._is_ble_endpoint_device(device):
+            return False
+        model = self._model_spec(device)
+        return bool(model and getattr(model, "ble_endpoint_experimental", False))
+
+    def _ble_multi_profile_table_limited(self, device: Optional[DetectedDevice]) -> bool:
+        model = self._model_spec(device)
+        return bool(model and getattr(model, "ble_multi_profile_table_limited", False))
+
+    def _has_onboard_profile_bank_switch(self, device: Optional[DetectedDevice]) -> bool:
+        model = self._model_spec(device)
+        return bool(model and getattr(model, "onboard_profile_bank_switch", False))
 
     @staticmethod
     def _unsafe_stage_activate_enabled() -> bool:
@@ -256,6 +310,56 @@ class TuiActionsMixin:
                     for identifier, fields in bt_unavailable.items()
                     if identifier in active_ids
                 }
+            prefetch_attempted = getattr(self, "_feature_prefetch_attempted", None)
+            prefetch_inflight = getattr(self, "_feature_prefetch_inflight_devices", None)
+            prefetch_retry_due = getattr(self, "_feature_prefetch_retry_due_at", None)
+            prefetch_lock = getattr(self, "_feature_prefetch_lock", None)
+            if (
+                isinstance(prefetch_attempted, set)
+                or isinstance(prefetch_inflight, set)
+                or isinstance(prefetch_retry_due, dict)
+            ):
+                if hasattr(prefetch_lock, "__enter__") and hasattr(prefetch_lock, "__exit__"):
+                    lock_ctx = prefetch_lock
+                else:
+                    lock_ctx = None
+                if lock_ctx is not None:
+                    with lock_ctx:
+                        if isinstance(prefetch_attempted, set):
+                            self._feature_prefetch_attempted = {
+                                (identifier, feature)
+                                for identifier, feature in prefetch_attempted
+                                if identifier in active_ids
+                            }
+                        if isinstance(prefetch_inflight, set):
+                            self._feature_prefetch_inflight_devices = {
+                                identifier
+                                for identifier in prefetch_inflight
+                                if identifier in active_ids
+                            }
+                        if isinstance(prefetch_retry_due, dict):
+                            self._feature_prefetch_retry_due_at = {
+                                (identifier, feature): float(due_at)
+                                for (identifier, feature), due_at in prefetch_retry_due.items()
+                                if identifier in active_ids
+                            }
+                else:
+                    if isinstance(prefetch_attempted, set):
+                        self._feature_prefetch_attempted = {
+                            (identifier, feature)
+                            for identifier, feature in prefetch_attempted
+                            if identifier in active_ids
+                        }
+                    if isinstance(prefetch_inflight, set):
+                        self._feature_prefetch_inflight_devices = {
+                            identifier for identifier in prefetch_inflight if identifier in active_ids
+                        }
+                    if isinstance(prefetch_retry_due, dict):
+                        self._feature_prefetch_retry_due_at = {
+                            (identifier, feature): float(due_at)
+                            for (identifier, feature), due_at in prefetch_retry_due.items()
+                            if identifier in active_ids
+                        }
 
             if self.preselected_device_id:
                 for idx, device in enumerate(self.devices):
@@ -300,6 +404,8 @@ class TuiActionsMixin:
             dpi=tuple(state.dpi) if state.dpi is not None else None,
             dpi_active_stage=state.dpi_active_stage,
             dpi_stages=list(state.dpi_stages) if state.dpi_stages is not None else None,
+            onboard_bank_signature=state.onboard_bank_signature,
+            onboard_bank_match=state.onboard_bank_match,
             poll_rate=state.poll_rate,
             battery=state.battery,
         )
@@ -329,7 +435,7 @@ class TuiActionsMixin:
             if autosync_enabled():
                 self._maybe_apply_autosync(device, backend)
             state = DeviceState()
-            bt_experimental = self._is_bt_008e(device)
+            bt_experimental = self._is_experimental_ble_endpoint(device)
             bt_read_failed = False
             bt_failed_fields: List[str] = []
 
@@ -342,6 +448,38 @@ class TuiActionsMixin:
                     if 1 <= int(active) <= len(stages_list):
                         selected_stage = stages_list[int(active) - 1]
                         state.dpi = (int(selected_stage[0]), int(selected_stage[1]))
+                    if (
+                        self._has_onboard_profile_bank_switch(device)
+                        and self._is_ble_endpoint_device(device)
+                        and stages_list
+                    ):
+                        try:
+                            from razecli.ble.bank_signature import (
+                                bank_signature_from_parsed_stages,
+                                match_bank_snapshot_labels,
+                            )
+
+                            handle = device.backend_handle if isinstance(device.backend_handle, dict) else {}
+                            raw_ids = handle.get("ble_stage_ids")
+                            ids_list: List[int] = []
+                            if isinstance(raw_ids, list):
+                                ids_list = [int(x) for x in raw_ids][: len(stages_list)]
+                            if len(ids_list) < len(stages_list):
+                                ids_list = list(range(1, len(stages_list) + 1))
+                            marker = int(handle.get("ble_stage_marker") or 0)
+                            sig = bank_signature_from_parsed_stages(
+                                int(state.dpi_active_stage or 1),
+                                marker,
+                                stages_list,
+                                ids_list,
+                            )
+                            state.onboard_bank_signature = sig
+                            labels = match_bank_snapshot_labels(sig)
+                            if labels:
+                                state.onboard_bank_match = ", ".join(labels[:3])
+                        except Exception:
+                            state.onboard_bank_signature = None
+                            state.onboard_bank_match = None
                 except Exception as exc:  # pragma: no cover - runtime/hardware dependent
                     if bt_experimental:
                         bt_read_failed = True
@@ -422,13 +560,14 @@ class TuiActionsMixin:
                     bt_map.pop(device.identifier, None)
             if bt_read_failed and current_failed != previous_failed and not self._status_locked():
                 failed = ", ".join(current_failed)
+                pid_label = self._usb_pid_label(device)
                 if failed:
                     self.status = (
-                        "Bluetooth mode (1532:008E) is experimental; "
+                        f"Bluetooth mode ({pid_label}) is experimental; "
                         f"could not read: {failed}"
                     )
                 else:
-                    self.status = "Bluetooth mode (1532:008E) is experimental; some values may be unavailable"
+                    self.status = f"Bluetooth mode ({pid_label}) is experimental; some values may be unavailable"
         finally:
             if self._state_loading_device_id == device.identifier:
                 self._state_loading_device_id = None
@@ -481,8 +620,11 @@ class TuiActionsMixin:
             backend.set_dpi_stages(device, active_stage, stages)
             self.status = f"Applied autosync DPI profiles for {device.model_id}"
         except Exception:
-            if self._is_bt_008e(device):
-                self.status = "Autosync exists but Bluetooth endpoint (008E) could not be updated on this host"
+            if self._is_ble_endpoint_device(device):
+                self.status = (
+                    "Autosync exists but Bluetooth endpoint "
+                    f"({self._usb_pid_label(device)}) could not be updated on this host"
+                )
 
     def _set_dpi(self, dpi_x: int, dpi_y: int) -> None:
         device = self._selected()
@@ -684,11 +826,15 @@ class TuiActionsMixin:
             self.status = "No DPI profiles found on device"
             return
         if len(stages_list) == 1:
-            self._set_status(
-                "Only one DPI profile is available over current transport. "
-                "On BLE (1532:008E), multi-profile editing is limited; use USB/2.4 for full profile tables.",
-                hold_seconds=8.0,
-            )
+            if self._ble_multi_profile_table_limited(device):
+                message = (
+                    "Only one DPI profile is available over current transport. "
+                    "Multi-profile editing is limited on this model over BLE; "
+                    "use USB/2.4 for full profile tables."
+                )
+            else:
+                message = "Only one DPI profile is available over current transport."
+            self._set_status(message, hold_seconds=8.0)
             return
 
         if active_stage < 1 or active_stage > len(stages_list):
@@ -794,7 +940,6 @@ class TuiActionsMixin:
         active_stage = int(cached_active)
         if not current:
             self._set_status("Loading current DPI profiles...", hold_seconds=3.0)
-            self._render(stdscr)
             try:
                 active_stage, stages = backend.get_dpi_stages(device)
             except Exception as exc:  # pragma: no cover - runtime/hardware dependent
@@ -806,23 +951,23 @@ class TuiActionsMixin:
                 return
 
         if (
-            self._is_bt_008e(device)
+            self._is_ble_endpoint_device(device)
             and device.backend == "macos-ble"
+            and self._ble_multi_profile_table_limited(device)
             and len(current) <= 1
             and target_count > len(current)
         ):
             message = (
                 "This BLE endpoint currently reports a single DPI profile. "
                 "Adding more profiles is not mapped reliably yet. "
-                "Use USB/2.4 to create the profile table first."
+                "RazeCLI will try anyway, but USB/2.4 is still recommended."
             )
             self._set_status(message, hold_seconds=8.0)
             self._show_action_dialog(
                 stdscr,
-                title="BLE limitation",
+                title="BLE caution",
                 message=message,
             )
-            return
 
         if target_count == len(current):
             message = f"DPI profile count unchanged ({target_count})."
@@ -922,9 +1067,510 @@ class TuiActionsMixin:
         except Exception as exc:  # pragma: no cover - runtime/hardware dependent
             _on_error(exc)
 
+    def _load_current_dpi_profiles(
+        self,
+        stdscr,
+        *,
+        device: DetectedDevice,
+        backend,
+    ) -> Optional[Tuple[int, List[Tuple[int, int]]]]:
+        # Prefer a fresh device read, but reuse the last main-panel refresh when it is recent
+        # so opening `n` does not block on another full BLE scan (can be many seconds per read).
+        device_id = device.identifier
+        now = time.monotonic()
+        cache_map = getattr(self, "_state_cache", None)
+        refreshed_map = getattr(self, "_state_refreshed_at", None)
+        refresh_iv = float(getattr(self, "_refresh_interval_s", 1.5))
+        max_age = max(8.0, refresh_iv * 4)
+        if isinstance(cache_map, dict) and isinstance(refreshed_map, dict):
+            last = float(refreshed_map.get(device_id, 0.0))
+            cached_state = cache_map.get(device_id)
+            if (
+                cached_state is not None
+                and (now - last) <= max_age
+                and cached_state.dpi_stages
+            ):
+                active = int(cached_state.dpi_active_stage or 1)
+                stages = [(int(x), int(y)) for (x, y) in list(cached_state.dpi_stages)]
+                if stages and active >= 1 and active <= len(stages):
+                    return active, stages
+                if stages:
+                    return 1, stages
+
+        self._set_status("Loading current DPI profiles...", hold_seconds=3.0)
+        try:
+            active_stage, stages = backend.get_dpi_stages(device)
+        except Exception as exc:  # pragma: no cover - runtime/hardware dependent
+            self._set_status(f"Could not read DPI profiles: {exc}", hold_seconds=8.0)
+            return None
+        current = [(int(x), int(y)) for (x, y) in list(stages)]
+        if not current:
+            self._set_status("No DPI profiles found on device", hold_seconds=6.0)
+            return None
+        active = int(active_stage)
+        if active < 1 or active > len(current):
+            active = 1
+        return int(active), current
+
+    def _validate_stage_values(self, device: DetectedDevice, stages: Sequence[Tuple[int, int]]) -> Optional[str]:
+        model = self.service.registry.get(device.model_id) if device.model_id else None
+        for dpi_x, dpi_y in stages:
+            x = int(dpi_x)
+            y = int(dpi_y)
+            if x <= 0 or y <= 0:
+                return "Invalid DPI value"
+            if model and model.dpi_min is not None and (x < model.dpi_min or y < model.dpi_min):
+                return f"DPI must be at least {model.dpi_min}"
+            if model and model.dpi_max is not None and (x > model.dpi_max or y > model.dpi_max):
+                return f"DPI must be <= {model.dpi_max}"
+        return None
+
+    def _apply_dpi_stage_layout(
+        self,
+        stdscr,
+        *,
+        device: DetectedDevice,
+        backend,
+        active_stage: int,
+        stages: Sequence[Tuple[int, int]],
+        description: str,
+    ) -> bool:
+        stages_list = [(int(x), int(y)) for (x, y) in stages]
+        if not stages_list:
+            self._set_status("At least one DPI profile is required", hold_seconds=6.0)
+            return False
+        if len(stages_list) > MAX_DPI_STAGES:
+            self._set_status(f"At most {MAX_DPI_STAGES} DPI profiles are supported", hold_seconds=6.0)
+            return False
+
+        validation_error = self._validate_stage_values(device, stages_list)
+        if validation_error:
+            self._set_status(validation_error, hold_seconds=6.0)
+            return False
+
+        active = int(active_stage)
+        if active < 1 or active > len(stages_list):
+            active = 1
+
+        def _work() -> tuple[int, int]:
+            backend.set_dpi_stages(device, active, stages_list)
+            mirror_ok, mirror_failed = mirror_to_transport_targets(
+                self.service,
+                device,
+                lambda peer: self.service.resolve_backend(peer).set_dpi_stages(peer, active, stages_list),
+                required_capability="dpi-stages",
+            )
+            self._persist_autosync(device, backend)
+            return int(mirror_ok), int(mirror_failed)
+
+        try:
+            mirror_ok, mirror_failed = self._run_with_modal(
+                stdscr,
+                title="DPI Levels",
+                description=str(description),
+                work=_work,
+                footer="Writing DPI values",
+            )
+        except Exception as exc:  # pragma: no cover - runtime/hardware dependent
+            message = f"Could not set DPI profiles: {exc}"
+            self._set_status(message, hold_seconds=8.0)
+            self._show_action_dialog(
+                stdscr,
+                title="Write failed",
+                message=message,
+            )
+            return False
+
+        if mirror_ok or mirror_failed:
+            self.status = (
+                f"DPI profiles updated: {len(stages_list)} total (active {active})"
+                f" | mirrored={mirror_ok} failed={mirror_failed}"
+            )
+        else:
+            self.status = f"DPI profiles updated: {len(stages_list)} total (active {active})"
+        self._schedule_state_refresh(force=True)
+        return True
+
+    def _set_dpi_profile_ladder(self, stdscr) -> None:
+        device = self._selected()
+        if device is None:
+            self.status = "No device selected"
+            return
+        if self._is_detect_only_backend(device):
+            self.status = "Selected backend is detect-only (macos-profiler); DPI profile control is unavailable"
+            return
+        if "dpi-stages" not in device.capabilities:
+            self.status = "Selected device does not support DPI profiles"
+            return
+
+        backend = self.service.resolve_backend(device)
+        loaded = self._load_current_dpi_profiles(stdscr, device=device, backend=backend)
+        if loaded is None:
+            return
+        active_stage, current = loaded
+
+        default_count = len(current) if current else 1
+        target_count = self._prompt_int(
+            stdscr,
+            f"Target DPI profile count (1-{MAX_DPI_STAGES})",
+            default_count,
+            help_text="How many DPI levels the DPI button should cycle through.",
+        )
+        if target_count is None:
+            return
+        if target_count < 1 or target_count > MAX_DPI_STAGES:
+            self._show_action_dialog(
+                stdscr,
+                title="Invalid value",
+                message=f"DPI profile count must be between 1 and {MAX_DPI_STAGES}.",
+            )
+            return
+
+        default_x, default_y = self._default_stage_dpi(active_stage, current)
+        base_x = self._prompt_int(
+            stdscr,
+            "Base DPI X (stage 1)",
+            int(default_x),
+            help_text="First stage value. Next stages are calculated from this.",
+        )
+        if base_x is None:
+            return
+        base_y = self._prompt_int(
+            stdscr,
+            "Base DPI Y (stage 1)",
+            int(default_y),
+            help_text="Use same as X for symmetric DPI.",
+        )
+        if base_y is None:
+            return
+
+        default_increment = 400
+        if len(current) >= 2:
+            try:
+                inferred_x = int(current[1][0]) - int(current[0][0])
+                inferred_y = int(current[1][1]) - int(current[0][1])
+                if inferred_x == inferred_y and inferred_x != 0:
+                    default_increment = int(inferred_x)
+            except Exception:
+                default_increment = 400
+
+        increment = self._prompt_int(
+            stdscr,
+            "DPI increment per stage (+/-)",
+            int(default_increment),
+            help_text="Example: 400 => 800/1200/1600...  |  -400 builds descending stages.",
+        )
+        if increment is None:
+            return
+        if int(increment) == 0:
+            self._show_action_dialog(
+                stdscr,
+                title="Invalid value",
+                message="Increment cannot be 0.",
+            )
+            return
+
+        default_active = int(active_stage)
+        if default_active < 1 or default_active > int(target_count):
+            default_active = 1
+        new_active = self._prompt_int(
+            stdscr,
+            f"Active stage index (1-{int(target_count)})",
+            int(default_active),
+            help_text="Which stage should be active right after apply.",
+        )
+        if new_active is None:
+            return
+        if new_active < 1 or new_active > int(target_count):
+            self._show_action_dialog(
+                stdscr,
+                title="Invalid value",
+                message=f"Active stage must be between 1 and {int(target_count)}.",
+            )
+            return
+
+        new_stages: List[Tuple[int, int]] = []
+        for index in range(int(target_count)):
+            new_stages.append(
+                (
+                    int(base_x) + (index * int(increment)),
+                    int(base_y) + (index * int(increment)),
+                )
+            )
+
+        if (
+            self._is_ble_endpoint_device(device)
+            and device.backend == "macos-ble"
+            and self._ble_multi_profile_table_limited(device)
+            and len(current) <= 1
+            and int(target_count) > len(current)
+        ):
+            self._show_action_dialog(
+                stdscr,
+                title="BLE caution",
+                message=(
+                    "This BLE endpoint currently reports a single DPI profile. "
+                    "RazeCLI will try writing the full table anyway, but USB/2.4 is still safer."
+                ),
+            )
+
+        self._apply_dpi_stage_layout(
+            stdscr,
+            device=device,
+            backend=backend,
+            active_stage=int(new_active),
+            stages=new_stages,
+            description=f"Applying {int(target_count)} staged DPI levels",
+        )
+
+    def _set_dpi_adjust_step(self, stdscr) -> None:
+        current = max(1, int(getattr(self, "_dpi_adjust_step", 100)))
+        new_step = self._prompt_int(
+            stdscr,
+            "DPI +/- adjustment step",
+            current,
+            help_text=(
+                "Keyboard +/- step in the main view. "
+                "This does not change the mouse's physical DPI-button stage table."
+            ),
+        )
+        if new_step is None:
+            return
+        if int(new_step) < 1 or int(new_step) > 5000:
+            self._show_action_dialog(
+                stdscr,
+                title="Invalid value",
+                message="DPI +/- step must be between 1 and 5000.",
+            )
+            return
+        self._dpi_adjust_step = int(new_step)
+        self._set_status(f"DPI +/- step set to {int(self._dpi_adjust_step)}", hold_seconds=6.0)
+
+    def _list_tui_dpi_presets(self) -> List[Dict[str, Any]]:
+        rows = list_dpi_stage_presets()
+        filtered: List[Dict[str, Any]] = []
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            if not name or name.startswith(AUTOSYNC_PRESET_PREFIX):
+                continue
+            filtered.append(dict(row))
+        return filtered
+
+    def _save_current_dpi_preset(self, stdscr) -> None:
+        device = self._selected()
+        if device is None:
+            self.status = "No device selected"
+            return
+        if self._is_detect_only_backend(device):
+            self.status = "Selected backend is detect-only (macos-profiler); DPI profile control is unavailable"
+            return
+        if "dpi-stages" not in device.capabilities:
+            self.status = "Selected device does not support DPI profiles"
+            return
+
+        backend = self.service.resolve_backend(device)
+        loaded = self._load_current_dpi_profiles(stdscr, device=device, backend=backend)
+        if loaded is None:
+            return
+        active_stage, stages = loaded
+        default_name = f"{str(device.model_id or 'dpi').strip()}-{len(stages)}lvl"
+        preset_name = self._prompt_text(
+            stdscr,
+            "Preset name",
+            default_name,
+            help_text="Save current DPI stage table under this name.",
+            max_len=64,
+        )
+        if preset_name is None:
+            return
+        normalized_name = str(preset_name).strip()
+        if not normalized_name:
+            self._show_action_dialog(
+                stdscr,
+                title="Invalid preset name",
+                message="Preset name cannot be empty.",
+            )
+            return
+
+        try:
+            path = save_dpi_stage_preset(
+                name=normalized_name,
+                model_id=device.model_id,
+                active_stage=int(active_stage),
+                stages=stages,
+            )
+        except Exception as exc:  # pragma: no cover - runtime/hardware dependent
+            self._set_status(f"Could not save DPI preset: {exc}", hold_seconds=8.0)
+            return
+        self.status = f"Saved DPI preset '{normalized_name}' to {path}"
+
+    def _load_dpi_preset(self, stdscr) -> None:
+        device = self._selected()
+        if device is None:
+            self.status = "No device selected"
+            return
+        if self._is_detect_only_backend(device):
+            self.status = "Selected backend is detect-only (macos-profiler); DPI profile control is unavailable"
+            return
+        if "dpi-stages" not in device.capabilities:
+            self.status = "Selected device does not support DPI profiles"
+            return
+
+        presets = self._list_tui_dpi_presets()
+        if not presets:
+            self._set_status("No DPI presets available", hold_seconds=6.0)
+            return
+
+        options = []
+        for entry in presets:
+            options.append(
+                f"{entry['name']}  (model={entry.get('model_id') or '-'} | "
+                f"stages={int(entry.get('stages_count') or 0)} | active={int(entry.get('active_stage') or 1)})"
+            )
+        selected_index = self._select_menu(
+            stdscr,
+            title="DPI Presets",
+            description="Select preset to load",
+            options=options,
+            default_index=0,
+            footer="Up/Down select | Enter load | Esc cancel",
+        )
+        if selected_index is None:
+            return
+        selected = presets[selected_index]
+        preset_name = str(selected["name"])
+        try:
+            preset = load_dpi_stage_preset(preset_name)
+        except Exception as exc:  # pragma: no cover - runtime/hardware dependent
+            self._set_status(f"Could not load preset: {exc}", hold_seconds=8.0)
+            return
+
+        preset_model = str(preset.get("model_id") or "").strip()
+        current_model = str(device.model_id or "").strip()
+        if preset_model and current_model and preset_model != current_model:
+            confirm = self._select_menu(
+                stdscr,
+                title="Model mismatch",
+                description=(
+                    f"Preset model '{preset_model}' differs from selected device '{current_model}'. "
+                    "Load anyway?"
+                ),
+                options=["No", "Yes, load anyway"],
+                default_index=0,
+                footer="Enter confirm | Esc cancel",
+            )
+            if confirm != 1:
+                return
+
+        stages = [(int(x), int(y)) for (x, y) in list(preset.get("stages") or [])]
+        active_stage = int(preset.get("active_stage") or 1)
+        backend = self.service.resolve_backend(device)
+        self._apply_dpi_stage_layout(
+            stdscr,
+            device=device,
+            backend=backend,
+            active_stage=active_stage,
+            stages=stages,
+            description=f"Loading preset '{preset_name}'",
+        )
+
+    def _delete_dpi_preset(self, stdscr) -> None:
+        presets = self._list_tui_dpi_presets()
+        if not presets:
+            self._set_status("No DPI presets available", hold_seconds=6.0)
+            return
+
+        options = []
+        for entry in presets:
+            options.append(
+                f"{entry['name']}  (model={entry.get('model_id') or '-'} | stages={int(entry.get('stages_count') or 0)})"
+            )
+        selected_index = self._select_menu(
+            stdscr,
+            title="Delete DPI Preset",
+            description="Select preset to delete",
+            options=options,
+            default_index=0,
+            footer="Up/Down select | Enter delete | Esc cancel",
+        )
+        if selected_index is None:
+            return
+
+        preset_name = str(presets[selected_index]["name"])
+        confirm = self._select_menu(
+            stdscr,
+            title="Confirm delete",
+            description=f"Delete preset '{preset_name}'?",
+            options=["Cancel", "Delete"],
+            default_index=0,
+            footer="Enter confirm | Esc cancel",
+        )
+        if confirm != 1:
+            return
+        try:
+            delete_dpi_stage_preset(preset_name)
+        except Exception as exc:  # pragma: no cover - runtime/hardware dependent
+            self._set_status(f"Could not delete preset: {exc}", hold_seconds=8.0)
+            return
+        self.status = f"Deleted DPI preset '{preset_name}'"
+
     def _edit_dpi_levels(self, stdscr) -> None:
-        """Compatibility entrypoint for TUI `n` binding."""
-        self._set_dpi_profile_count(stdscr)
+        """TUI `n` binding: DPI levels editor menu."""
+        if not hasattr(stdscr, "getch"):
+            # Test/legacy fallback.
+            self._set_dpi_profile_count(stdscr)
+            return
+
+        device = self._selected()
+        if device is None:
+            self.status = "No device selected"
+            return
+        if self._is_detect_only_backend(device):
+            self.status = "Selected backend is detect-only (macos-profiler); DPI profile control is unavailable"
+            return
+        if "dpi-stages" not in device.capabilities:
+            self.status = "Selected device does not support DPI profiles"
+            return
+
+        while True:
+            choice = self._select_menu(
+                stdscr,
+                title="DPI Levels",
+                description=(
+                    "Choose editor for the current onboard profile/bank "
+                    "(switch bank first with the underside profile button)."
+                ),
+                options=[
+                    "Set profile count (current editor)",
+                    "Build mouse DPI-button ladder (count + increment)",
+                    "Set keyboard +/- adjustment step",
+                    "Load DPI preset",
+                    "Save current as preset",
+                    "Delete DPI preset",
+                ],
+                default_index=1,
+                footer="Up/Down select | Enter confirm | Esc back",
+            )
+            if choice is None:
+                return
+            if choice == 0:
+                self._set_dpi_profile_count(stdscr)
+                continue
+            if choice == 1:
+                self._set_dpi_profile_ladder(stdscr)
+                continue
+            if choice == 2:
+                self._set_dpi_adjust_step(stdscr)
+                continue
+            if choice == 3:
+                self._load_dpi_preset(stdscr)
+                continue
+            if choice == 4:
+                self._save_current_dpi_preset(stdscr)
+                continue
+            if choice == 5:
+                self._delete_dpi_preset(stdscr)
+                continue
 
     def _prompt_int(
         self,
@@ -1236,23 +1882,37 @@ class TuiActionsMixin:
 
     def _read_rgb_state_for_ui(self, device: DetectedDevice) -> Dict[str, Any]:
         backend = self.service.resolve_backend(device)
+        state: Dict[str, Any]
         try:
-            state = backend.get_rgb(device)
-            if isinstance(state, dict):
-                return dict(state)
+            payload = backend.get_rgb(device)
+            if isinstance(payload, dict):
+                state = dict(payload)
+            else:
+                state = get_rgb_scaffold(model_id=device.model_id)
         except Exception:
-            pass
-        return get_rgb_scaffold(model_id=device.model_id)
+            state = get_rgb_scaffold(model_id=device.model_id)
+
+        rgb_cache = getattr(self, "_rgb_cache", None)
+        if isinstance(rgb_cache, dict):
+            rgb_cache[device.identifier] = dict(state)
+        return dict(state)
 
     def _read_button_mapping_for_ui(self, device: DetectedDevice) -> Dict[str, Any]:
         backend = self.service.resolve_backend(device)
+        state: Dict[str, Any]
         try:
-            state = backend.get_button_mapping(device)
-            if isinstance(state, dict):
-                return dict(state)
+            payload = backend.get_button_mapping(device)
+            if isinstance(payload, dict):
+                state = dict(payload)
+            else:
+                state = get_button_mapping_scaffold(model_id=device.model_id)
         except Exception:
-            pass
-        return get_button_mapping_scaffold(model_id=device.model_id)
+            state = get_button_mapping_scaffold(model_id=device.model_id)
+
+        mapping_cache = getattr(self, "_button_mapping_cache", None)
+        if isinstance(mapping_cache, dict):
+            mapping_cache[device.identifier] = dict(state)
+        return dict(state)
 
     def _read_button_actions_for_ui(self, device: DetectedDevice, mapping: Dict[str, Any]) -> List[str]:
         backend = self.service.resolve_backend(device)
@@ -1561,7 +2221,7 @@ class TuiActionsMixin:
             if action_index == 1:
                 modes = [str(item).strip().lower() for item in (modes_raw or []) if str(item).strip()]
                 if not modes:
-                    modes = ["off", "static", "breathing", "spectrum"]
+                    modes = ["off", "static", "breathing", "breathing-single", "breathing-random", "spectrum"]
                 mode_default = modes.index(current_mode) if current_mode in modes else 0
                 mode: Optional[str] = None
                 brightness: Optional[int] = None
@@ -1606,7 +2266,7 @@ class TuiActionsMixin:
                                 message="Brightness must be between 0 and 100.",
                             )
                             continue
-                        if mode in {"static", "breathing"}:
+                        if mode in {"static", "breathing", "breathing-single", "breathing-random"}:
                             step = "color"
                         else:
                             color = current_color
@@ -1699,7 +2359,15 @@ class TuiActionsMixin:
             preset_names = [
                 name
                 for name in presets.keys()
-                if name not in {"off", "static-green", "breathing-warm", "spectrum-medium"}
+                if name
+                not in {
+                    "off",
+                    "static-green",
+                    "breathing-green",
+                    "breathing-random",
+                    "breathing-warm",
+                    "spectrum-medium",
+                }
             ]
             if not preset_names:
                 self._set_status("No custom RGB presets to delete", hold_seconds=6.0)

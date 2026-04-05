@@ -154,6 +154,54 @@ class CliParserTest(unittest.TestCase):
         self.assertEqual(args.attempts, 2)
         self.assertEqual(args.key, ["00850001", "0b850100"])
 
+    def test_ble_rgb_probe_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "rgb-probe",
+                "--address",
+                "02:11:22:33:44:55",
+                "--attempts",
+                "2",
+                "--brightness-key",
+                "10850101",
+                "--frame-key",
+                "10840000",
+                "--mode-key",
+                "10830000",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "rgb-probe")
+        self.assertEqual(args.address, "02:11:22:33:44:55")
+        self.assertEqual(args.attempts, 2)
+        self.assertEqual(args.brightness_key, ["10850101"])
+        self.assertEqual(args.frame_key, ["10840000"])
+        self.assertEqual(args.mode_key, ["10830000"])
+
+    def test_ble_button_probe_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "ble",
+                "button-probe",
+                "--address",
+                "02:11:22:33:44:55",
+                "--attempts",
+                "2",
+                "--key",
+                "08840104",
+                "--key",
+                "08840105",
+            ]
+        )
+        self.assertEqual(args.command, "ble")
+        self.assertEqual(args.ble_command, "button-probe")
+        self.assertEqual(args.address, "02:11:22:33:44:55")
+        self.assertEqual(args.attempts, 2)
+        self.assertEqual(args.key, ["08840104", "08840105"])
+
     def test_ble_bank_probe_parse(self):
         parser = build_parser()
         args = parser.parse_args(

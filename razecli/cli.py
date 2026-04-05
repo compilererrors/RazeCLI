@@ -12,11 +12,13 @@ from razecli.ble.constants import (
     DEFAULT_RAZER_BT_WRITE_CHAR_UUID,
 )
 from razecli.errors import CapabilityUnsupportedError, DeviceSelectionError, RazeCliError
+from razecli.model_registry import ModelRegistry
 
 if TYPE_CHECKING:
     from razecli.device_service import DeviceService
 
-DEFAULT_MODEL = "deathadder-v2-pro"
+DEFAULT_MODEL = ModelRegistry.load().default_cli_model_slug()
+DEFAULT_BLE_NAME_QUERY = "Razer"
 
 
 def _emit(payload: object, *, as_json: bool) -> None:
@@ -27,6 +29,10 @@ def _emit(payload: object, *, as_json: bool) -> None:
 
 
 def _add_target_args(parser: argparse.ArgumentParser, default_model: bool = True) -> None:
+    if default_model and DEFAULT_MODEL:
+        default_help = f"Defaults to {DEFAULT_MODEL} for settings commands. "
+    else:
+        default_help = ""
     parser.add_argument(
         "--device",
         help="Target device id (from `razecli devices`)",
@@ -35,7 +41,7 @@ def _add_target_args(parser: argparse.ArgumentParser, default_model: bool = True
         "--model",
         default=DEFAULT_MODEL if default_model else None,
         help=(
-            "Model slug to target. Defaults to deathadder-v2-pro for settings commands. "
+            f"Model slug to target. {default_help}"
             "Use `razecli models` for available slugs."
         ),
     )
@@ -57,6 +63,21 @@ def _add_feature_store_file_arg(parser: argparse.ArgumentParser) -> None:
         help=(
             "Path to local scaffold feature store JSON. "
             "Defaults to $RAZECLI_FEATURE_STORE_PATH or ~/.config/razecli/feature_scaffolds.json"
+        ),
+    )
+
+
+def _add_ble_target_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--address",
+        help="BLE MAC (F6:F2:0D:4E:D9:30) or CoreBluetooth UUID from `razecli ble scan` / devices",
+    )
+    parser.add_argument(
+        "--name",
+        default=DEFAULT_BLE_NAME_QUERY,
+        help=(
+            "Fallback name filter when --address is omitted "
+            f"(default: {DEFAULT_BLE_NAME_QUERY})"
         ),
     )
 
@@ -221,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     rgb_set.add_argument(
         "--mode",
         required=True,
-        choices=("off", "static", "breathing", "spectrum"),
+        choices=("off", "static", "breathing", "breathing-single", "breathing-random", "spectrum"),
         help="RGB mode",
     )
     rgb_set.add_argument(
@@ -311,12 +332,7 @@ def build_parser() -> argparse.ArgumentParser:
     ble_scan.add_argument("--name", help="Optional case-insensitive name filter")
 
     ble_services = ble_sub.add_parser("services", help="List BLE services and characteristics")
-    ble_services.add_argument("--address", help="BLE address/id from `razecli ble scan`")
-    ble_services.add_argument(
-        "--name",
-        default="DA V2 Pro",
-        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
-    )
+    _add_ble_target_args(ble_services)
     ble_services.add_argument("--timeout", type=float, default=8.0, help="Probe timeout in seconds")
     ble_services.add_argument(
         "--read",
@@ -328,12 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
         "raw",
         help="Experimental raw GATT transceive (write/read/notify) for BLE reverse engineering",
     )
-    ble_raw.add_argument("--address", help="BLE address/id from `razecli ble scan`")
-    ble_raw.add_argument(
-        "--name",
-        default="DA V2 Pro",
-        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
-    )
+    _add_ble_target_args(ble_raw)
     ble_raw.add_argument(
         "--payload",
         required=True,
@@ -390,12 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
         "poll-probe",
         help="Probe Bluetooth poll-rate keys and show detailed decode diagnostics",
     )
-    ble_poll_probe.add_argument("--address", help="BLE address/id from `razecli ble scan`")
-    ble_poll_probe.add_argument(
-        "--name",
-        default="DA V2 Pro",
-        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
-    )
+    _add_ble_target_args(ble_poll_probe)
     ble_poll_probe.add_argument(
         "--timeout",
         type=float,
@@ -424,16 +430,95 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    ble_rgb_probe = ble_sub.add_parser(
+        "rgb-probe",
+        help="Probe BLE RGB read keys (brightness/frame/mode) with decode diagnostics",
+    )
+    _add_ble_target_args(ble_rgb_probe)
+    ble_rgb_probe.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Connect/resolve timeout in seconds",
+    )
+    ble_rgb_probe.add_argument(
+        "--response-timeout",
+        type=float,
+        default=1.5,
+        help="Wait time in seconds for response notifications",
+    )
+    ble_rgb_probe.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help="How many full key rounds to run (default: 1)",
+    )
+    ble_rgb_probe.add_argument(
+        "--brightness-key",
+        action="append",
+        default=None,
+        help=(
+            "Override brightness read key (4 bytes hex, repeat flag for multiple). "
+            "Example: --brightness-key 10850101"
+        ),
+    )
+    ble_rgb_probe.add_argument(
+        "--frame-key",
+        action="append",
+        default=None,
+        help=(
+            "Override RGB frame read key (4 bytes hex, repeat flag for multiple). "
+            "Example: --frame-key 10840000"
+        ),
+    )
+    ble_rgb_probe.add_argument(
+        "--mode-key",
+        action="append",
+        default=None,
+        help=(
+            "Override RGB mode read key (4 bytes hex, repeat flag for multiple). "
+            "Example: --mode-key 10830000"
+        ),
+    )
+
+    ble_button_probe = ble_sub.add_parser(
+        "button-probe",
+        help="Probe BLE button-mapping read keys with decode diagnostics",
+    )
+    _add_ble_target_args(ble_button_probe)
+    ble_button_probe.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Connect/resolve timeout in seconds",
+    )
+    ble_button_probe.add_argument(
+        "--response-timeout",
+        type=float,
+        default=1.5,
+        help="Wait time in seconds for response notifications",
+    )
+    ble_button_probe.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help="How many full key rounds to run (default: 1)",
+    )
+    ble_button_probe.add_argument(
+        "--key",
+        action="append",
+        default=None,
+        help=(
+            "Override button read key (4 bytes hex, repeat flag for multiple). "
+            "Example: --key 08840104"
+        ),
+    )
+
     ble_bank_probe = ble_sub.add_parser(
         "bank-probe",
         help="Probe BLE DPI-stage keys and fingerprint the currently active onboard bank",
     )
-    ble_bank_probe.add_argument("--address", help="BLE address/id from `razecli ble scan`")
-    ble_bank_probe.add_argument(
-        "--name",
-        default="DA V2 Pro",
-        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
-    )
+    _add_ble_target_args(ble_bank_probe)
     ble_bank_probe.add_argument(
         "--timeout",
         type=float,
@@ -504,12 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bank-snapshot",
         help="Capture and persist a BLE bank fingerprint snapshot",
     )
-    ble_bank_snapshot.add_argument("--address", help="BLE address/id from `razecli ble scan`")
-    ble_bank_snapshot.add_argument(
-        "--name",
-        default="DA V2 Pro",
-        help="Fallback name filter when --address is omitted (default: DA V2 Pro)",
-    )
+    _add_ble_target_args(ble_bank_snapshot)
     ble_bank_snapshot.add_argument(
         "--timeout",
         type=float,
@@ -647,7 +727,11 @@ def build_parser() -> argparse.ArgumentParser:
     tui_parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
-        help="Model slug filter for the TUI (default: deathadder-v2-pro)",
+        help=(
+            f"Model slug filter for the TUI (default: {DEFAULT_MODEL})"
+            if DEFAULT_MODEL
+            else "Model slug filter for the TUI"
+        ),
     )
     tui_parser.add_argument(
         "--all-models",
@@ -679,6 +763,14 @@ def _handle_models(service: DeviceService, as_json: bool) -> int:
                 "supported_poll_rates": list(model.supported_poll_rates),
                 "ble_poll_rate_supported": bool(model.ble_poll_rate_supported),
                 "ble_supported_poll_rates": list(model.ble_supported_poll_rates),
+                "ble_supported_rgb_modes": list(model.ble_supported_rgb_modes),
+                "ble_endpoint_product_ids": list(model.ble_endpoint_product_ids),
+                "ble_endpoint_experimental": bool(model.ble_endpoint_experimental),
+                "ble_multi_profile_table_limited": bool(model.ble_multi_profile_table_limited),
+                "onboard_profile_bank_switch": bool(model.onboard_profile_bank_switch),
+                "rawhid_mirror_product_ids": list(model.rawhid_mirror_product_ids),
+                "rawhid_transport_priority": list(model.rawhid_transport_priority),
+                "cli_default_target": bool(model.cli_default_target),
             }
             for model in models
         ]
@@ -692,6 +784,9 @@ def _handle_models(service: DeviceService, as_json: bool) -> int:
     for model in models:
         print(f"{model.slug} ({model.name})")
         print(f"  USB: {', '.join(format_usb_id(usb_id) for usb_id in model.usb_ids)}")
+        if model.ble_endpoint_product_ids:
+            ble_endpoints = ", ".join(f"{pid:04X}" for pid in model.ble_endpoint_product_ids)
+            print(f"  BLE endpoint PIDs: {ble_endpoints}")
         if model.dpi_min is not None or model.dpi_max is not None:
             print(f"  DPI range: {model.dpi_min or '?'}-{model.dpi_max or '?'}")
         if model.supported_poll_rates:
@@ -699,6 +794,14 @@ def _handle_models(service: DeviceService, as_json: bool) -> int:
         print(f"  BLE poll-rate: {'yes' if model.ble_poll_rate_supported else 'no'}")
         if model.ble_supported_poll_rates:
             print(f"  BLE poll rates: {', '.join(str(rate) for rate in model.ble_supported_poll_rates)}")
+        if model.ble_supported_rgb_modes:
+            print(f"  BLE RGB modes: {', '.join(model.ble_supported_rgb_modes)}")
+        if model.rawhid_transport_priority:
+            order = ", ".join(f"{pid:04X}" for pid in model.rawhid_transport_priority)
+            print(f"  Rawhid transport priority: {order}")
+        if model.cli_default_target:
+            print("  CLI default target: yes")
+        print()
 
     return 0
 

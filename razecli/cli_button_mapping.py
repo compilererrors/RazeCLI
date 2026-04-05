@@ -18,7 +18,7 @@ from razecli.feature_scaffolds import (
 
 def _merge_button_mapping_state(local_state: Dict[str, Any], hardware_state: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(local_state)
-    for key in ("mapping", "buttons_supported", "actions_suggested"):
+    for key in ("mapping", "buttons_supported", "actions_suggested", "read_confidence"):
         if key in hardware_state:
             merged[key] = hardware_state[key]
     return merged

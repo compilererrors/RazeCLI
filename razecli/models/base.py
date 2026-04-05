@@ -8,6 +8,18 @@ UsbId = Tuple[int, int]
 
 
 @dataclass(frozen=True)
+class RawHidPidSpec:
+    product_id: int
+    capabilities: Sequence[str]
+    name_hint: Optional[str] = None
+    tx_candidates: Sequence[int] = (0x3F, 0x1F, 0xFF)
+    report_id_candidates: Sequence[int] = (0x00,)
+    experimental: bool = False
+    # For some BT HID nodes, vendor usage pages are more reliable than generic mouse HID.
+    prefer_vendor_usage_page: bool = False
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     slug: str
     name: str
@@ -23,6 +35,26 @@ class ModelSpec:
     # Bluetooth (macos-ble) RGB mode policy.
     # Keep conservative by default; expand per model only after validation.
     ble_supported_rgb_modes: Sequence[str] = ("off", "static")
+    # Product IDs that represent Bluetooth endpoints for this model.
+    ble_endpoint_product_ids: Sequence[int] = ()
+    # Whether BLE control should be treated as experimental for this model.
+    ble_endpoint_experimental: bool = False
+    # True when BLE cannot reliably expand/create full DPI profile tables yet.
+    ble_multi_profile_table_limited: bool = False
+    # True when model has a physical onboard profile/bank switch button.
+    onboard_profile_bank_switch: bool = False
+    # Rawhid PIDs eligible for transport mirror within this model.
+    rawhid_mirror_product_ids: Sequence[int] = ()
+    # Rawhid endpoint profiles for this model.
+    rawhid_pid_specs: Sequence[RawHidPidSpec] = ()
+    # Optional rawhid transport priority (first = most preferred) when the same
+    # physical device appears on multiple rawhid endpoints.
+    rawhid_transport_priority: Sequence[int] = ()
+    # Marks which model should be the default CLI/TUI target when --model is omitted.
+    cli_default_target: bool = False
+    # Model-specific BLE button payload decode layouts (ordered by priority).
+    # Supported tags: "razer-v1", "compact-16", "slot-byte6".
+    ble_button_decode_layouts: Sequence[str] = ()
 
     def matches(self, vendor_id: int, product_id: int) -> bool:
         return (vendor_id, product_id) in self.usb_ids

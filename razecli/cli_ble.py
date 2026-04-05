@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import platform
 import time
@@ -11,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from razecli.backends.macos_ble_backend import MacOSBleBackend
+from razecli.ble.bank_signature import bank_signature_from_parsed_stages
 from razecli.ble.bank_snapshot_store import (
     append_bank_snapshot,
     get_latest_snapshot_by_label,
@@ -38,8 +38,33 @@ DEFAULT_BT_POLL_PROBE_KEYS = (
     "0b850000",
 )
 
+DEFAULT_BT_RGB_BRIGHTNESS_PROBE_KEYS = (
+    "10850101",
+    "10850100",
+)
+
+DEFAULT_BT_RGB_FRAME_PROBE_KEYS = (
+    "10840000",
+)
+
+DEFAULT_BT_RGB_MODE_PROBE_KEYS = (
+    "10830000",
+)
+
+DEFAULT_BT_BUTTON_PROBE_KEYS = (
+    "08840101",
+    "08840102",
+    "08840103",
+    "08840104",
+    "08840105",
+    "08840160",
+)
+
+# Include 0b840101 so shallow probe/snapshot can see a second DPI varstore slot; some firmware
+# keeps per-onboard-bank tables there while 0b840000 often returns empty.
 DEFAULT_BT_BANK_PROBE_KEYS = (
     "0b840100",
+    "0b840101",
     "0b840000",
 )
 
@@ -100,6 +125,57 @@ def _decode_poll_rate_payload_hex(payload_hex: str) -> Optional[int]:
     return MacOSBleBackend._decode_poll_rate_payload(payload)
 
 
+def _decode_rgb_brightness_payload_hex(payload_hex: str) -> Optional[int]:
+    text = str(payload_hex or "").strip()
+    if not text:
+        return None
+    try:
+        payload = bytes.fromhex(text)
+    except ValueError:
+        return None
+    if not payload:
+        return None
+    return MacOSBleBackend._rgb_u8_to_percent(int(payload[0]))
+
+
+def _decode_rgb_color_payload_hex(payload_hex: str) -> Optional[str]:
+    text = str(payload_hex or "").strip()
+    if not text:
+        return None
+    try:
+        payload = bytes.fromhex(text)
+    except ValueError:
+        return None
+    return MacOSBleBackend._rgb_color_from_payload(payload)
+
+
+def _decode_rgb_mode_payload_hex(payload_hex: str, *, brightness_percent: int) -> Optional[str]:
+    text = str(payload_hex or "").strip()
+    if not text:
+        return None
+    try:
+        payload = bytes.fromhex(text)
+    except ValueError:
+        return None
+    return MacOSBleBackend._rgb_mode_from_selector_payload(
+        payload,
+        brightness_percent=int(brightness_percent),
+    )
+
+
+def _decode_rgb_mode_selector_byte(payload_hex: str) -> Optional[int]:
+    text = str(payload_hex or "").strip()
+    if not text:
+        return None
+    try:
+        payload = bytes.fromhex(text)
+    except ValueError:
+        return None
+    if not payload:
+        return None
+    return int(payload[0])
+
+
 def _decode_bank_payload_hex(payload_hex: str) -> Optional[dict[str, Any]]:
     text = str(payload_hex or "").strip()
     if not text:
@@ -125,14 +201,12 @@ def _decode_bank_payload_hex(payload_hex: str) -> Optional[dict[str, Any]]:
             }
         )
 
-    signature_seed = {
-        "active_stage": int(active_stage),
-        "marker": int(marker),
-        "stages": stage_rows,
-    }
-    signature = hashlib.sha1(
-        json.dumps(signature_seed, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
+    signature = bank_signature_from_parsed_stages(
+        int(active_stage),
+        int(marker),
+        stages,
+        stage_ids,
+    )
 
     return {
         "active_stage": int(active_stage),
@@ -156,6 +230,47 @@ def _is_mac_address(text: Optional[str]) -> bool:
         except ValueError:
             return False
     return True
+
+
+def _is_corebluetooth_uuid_address(text: Optional[str]) -> bool:
+    """macOS often uses a 128-bit UUID device id from CoreBluetooth (see `ble scan`)."""
+    value = str(text or "").strip()
+    if len(value) != 36 or value.count("-") != 4:
+        return False
+    compact = value.replace("-", "")
+    if len(compact) != 32:
+        return False
+    try:
+        int(compact, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_valid_ble_bank_target_address(text: Optional[str]) -> bool:
+    return _is_mac_address(text) or _is_corebluetooth_uuid_address(text)
+
+
+def _require_ble_mac_address_for_bank_commands(address: str) -> None:
+    """Bank probe/snapshot need a real CoreBluetooth id; reject doc placeholders and typos."""
+    text = str(address or "").strip()
+    if not text:
+        raise RazeCliError(
+            "ble bank-probe / bank-snapshot require --address with the mouse Bluetooth MAC "
+            "or CoreBluetooth UUID, e.g. --address F6:F2:0D:4E:D9:30. Copy it from "
+            "`razecli devices`, `razecli --backend macos-ble devices`, `razecli ble scan`, "
+            "or the TUI id= line (MAC suffix after :bt:)."
+        )
+    if "\u2026" in text or text in {".", "..", "...", "…"}:
+        raise RazeCliError(
+            "--address must be the real MAC or UUID, not the documentation placeholder (… or ...). "
+            "Example: --address F6:F2:0D:4E:D9:30"
+        )
+    if not _is_valid_ble_bank_target_address(text):
+        raise RazeCliError(
+            f"--address must be a Bluetooth MAC (AA:BB:CC:DD:EE:FF) or CoreBluetooth UUID "
+            f"from `razecli ble scan`. Got {text!r}."
+        )
 
 
 def _is_device_not_found_error(message: str) -> bool:
@@ -419,6 +534,424 @@ def handle_ble(args: argparse.Namespace) -> int:
                 print(f"read_error char={row.get('char_uuid')} err={row.get('read_error')}")
         return 0
 
+    if args.ble_command == "rgb-probe":
+        brightness_keys = _normalize_probe_keys(
+            getattr(args, "brightness_key", None),
+            default_keys=DEFAULT_BT_RGB_BRIGHTNESS_PROBE_KEYS,
+        )
+        frame_keys = _normalize_probe_keys(
+            getattr(args, "frame_key", None),
+            default_keys=DEFAULT_BT_RGB_FRAME_PROBE_KEYS,
+        )
+        mode_keys = _normalize_probe_keys(
+            getattr(args, "mode_key", None),
+            default_keys=DEFAULT_BT_RGB_MODE_PROBE_KEYS,
+        )
+        attempts = max(1, int(getattr(args, "attempts", 1)))
+        rows: list[dict[str, Any]] = []
+        seen_reject = False
+        seen_parameter_error = False
+        decoded_brightness: Optional[int] = None
+        decoded_color: Optional[str] = None
+        decoded_mode: Optional[str] = None
+        decoded_mode_selector: Optional[int] = None
+        selected_brightness_key: Optional[str] = None
+        selected_frame_key: Optional[str] = None
+        selected_mode_key: Optional[str] = None
+
+        requested_address = str(getattr(args, "address", "") or "").strip()
+        resolution = _resolve_probe_target(requested_address=requested_address, timeout=float(args.timeout))
+        probe_address = resolution["probe_address"]
+        resolved_from = resolution["resolved_from"]
+        resolved_address = resolution["resolved_address"]
+        resolution_error = resolution["resolution_error"]
+        fallback_to_mac = False
+
+        key_groups = (
+            ("brightness", brightness_keys),
+            ("frame", frame_keys),
+            ("mode", mode_keys),
+        )
+        for round_idx in range(attempts):
+            for probe_group, keys in key_groups:
+                for key in keys:
+                    candidate_addresses = _candidate_probe_addresses(
+                        requested_address=requested_address,
+                        probe_address=probe_address,
+                        fallback_to_mac=fallback_to_mac,
+                    )
+
+                    row_emitted = False
+                    last_error: Optional[str] = None
+                    for candidate_address in candidate_addresses:
+                        used_fallback = bool(
+                            _is_mac_address(requested_address)
+                            and candidate_address == requested_address
+                            and candidate_address != probe_address
+                        )
+                        try:
+                            result = ble_vendor_transceive(
+                                address=candidate_address,
+                                name_query=getattr(args, "name", None),
+                                timeout=float(args.timeout),
+                                key=key,
+                                value_payload=None,
+                                response_timeout=float(args.response_timeout),
+                                write_with_response=True,
+                                notify_enabled=True,
+                            )
+                            vendor_decode = result.get("vendor_decode") if isinstance(result, dict) else {}
+                            if not isinstance(vendor_decode, dict):
+                                vendor_decode = {}
+                            payload_hex = str(vendor_decode.get("payload_hex") or "").strip().lower()
+                            status = str(vendor_decode.get("status") or "").strip().lower() or None
+                            status_code_raw = vendor_decode.get("status_code")
+                            try:
+                                status_code = int(status_code_raw) if status_code_raw is not None else None
+                            except Exception:
+                                status_code = None
+
+                            row: dict[str, Any] = {
+                                "round": int(round_idx + 1),
+                                "probe": str(probe_group),
+                                "key_hex": key.hex(),
+                                "used_address": candidate_address,
+                                "used_fallback_address": bool(used_fallback),
+                                "status": status,
+                                "status_code": status_code,
+                                "payload_hex": payload_hex,
+                                "payload_len": len(payload_hex) // 2 if payload_hex else 0,
+                            }
+                            if status_code == 3:
+                                seen_reject = True
+                            if status_code == 5:
+                                seen_parameter_error = True
+                            decode_allowed = bool(
+                                status_code == 2
+                                or status == "success"
+                                or (status_code is None and not status)
+                            )
+
+                            if probe_group == "brightness" and decode_allowed:
+                                parsed = _decode_rgb_brightness_payload_hex(payload_hex)
+                                row["decoded_brightness_percent"] = parsed
+                                if parsed is not None and decoded_brightness is None:
+                                    decoded_brightness = int(parsed)
+                                    selected_brightness_key = key.hex()
+                            elif probe_group == "brightness":
+                                row["decoded_brightness_percent"] = None
+                            elif probe_group == "frame" and decode_allowed:
+                                parsed = _decode_rgb_color_payload_hex(payload_hex)
+                                row["decoded_color"] = parsed
+                                if parsed and decoded_color is None:
+                                    decoded_color = str(parsed)
+                                    selected_frame_key = key.hex()
+                            elif probe_group == "frame":
+                                row["decoded_color"] = None
+                            else:
+                                selector_byte = _decode_rgb_mode_selector_byte(payload_hex)
+                                row["decoded_mode_selector"] = selector_byte
+                                if selector_byte is not None and decoded_mode_selector is None:
+                                    decoded_mode_selector = int(selector_byte)
+                                mode_brightness = int(decoded_brightness) if decoded_brightness is not None else 0
+                                parsed = None
+                                if decode_allowed:
+                                    parsed = _decode_rgb_mode_payload_hex(
+                                        payload_hex,
+                                        brightness_percent=mode_brightness,
+                                    )
+                                row["decoded_mode"] = parsed
+                                if parsed and decoded_mode is None:
+                                    decoded_mode = str(parsed)
+                                    selected_mode_key = key.hex()
+
+                            if used_fallback:
+                                fallback_to_mac = True
+                            rows.append(row)
+                            row_emitted = True
+                            break
+                        except Exception as exc:
+                            last_error = str(exc)
+                            if used_fallback:
+                                fallback_to_mac = True
+                            if _is_device_not_found_error(last_error) and _is_mac_address(requested_address):
+                                continue
+                            rows.append(
+                                {
+                                    "round": int(round_idx + 1),
+                                    "probe": str(probe_group),
+                                    "key_hex": key.hex(),
+                                    "used_address": candidate_address,
+                                    "used_fallback_address": bool(used_fallback),
+                                    "error": last_error,
+                                }
+                            )
+                            row_emitted = True
+                            break
+
+                    if not row_emitted:
+                        rows.append(
+                            {
+                                "round": int(round_idx + 1),
+                                "probe": str(probe_group),
+                                "key_hex": key.hex(),
+                                "used_address": requested_address or probe_address,
+                                "used_fallback_address": bool(_is_mac_address(requested_address)),
+                                "error": last_error or "Unknown BLE RGB probe error",
+                            }
+                        )
+
+        if decoded_brightness is not None or decoded_color is not None or decoded_mode is not None:
+            result_status = "ok"
+        elif seen_reject or seen_parameter_error:
+            result_status = "unsupported"
+        elif any("error" in row for row in rows):
+            result_status = "transport-error"
+        else:
+            result_status = "error"
+
+        payload = {
+            "status": result_status,
+            "attempts": attempts,
+            "keys": {
+                "brightness": [key.hex() for key in brightness_keys],
+                "frame": [key.hex() for key in frame_keys],
+                "mode": [key.hex() for key in mode_keys],
+            },
+            "results": rows,
+            "decoded": {
+                "brightness_percent": decoded_brightness,
+                "color": decoded_color,
+                "mode": decoded_mode,
+                "mode_selector": decoded_mode_selector,
+            },
+            "selected_keys": {
+                "brightness": selected_brightness_key,
+                "frame": selected_frame_key,
+                "mode": selected_mode_key,
+            },
+            "mac_fallback_active": bool(fallback_to_mac),
+        }
+        if resolved_from and resolved_address:
+            payload["auto_resolution"] = {
+                "requested_mac": resolved_from,
+                "resolved_address": resolved_address,
+            }
+        if resolution_error:
+            payload["auto_resolution_error"] = resolution_error
+
+        if args.json:
+            emit(payload, as_json=True)
+            return 0
+
+        decoded = payload.get("decoded", {})
+        print(
+            f"status={payload['status']} "
+            f"brightness={decoded.get('brightness_percent')}% "
+            f"color={decoded.get('color') or '-'} mode={decoded.get('mode') or '-'}"
+        )
+        for row in rows:
+            if row.get("error"):
+                print(
+                    f"round={row.get('round')} probe={row.get('probe')} "
+                    f"key={row.get('key_hex')} error={row.get('error')}"
+                )
+                continue
+            print(
+                f"round={row.get('round')} probe={row.get('probe')} key={row.get('key_hex')} "
+                f"status={row.get('status') or '-'} status_code={row.get('status_code')} "
+                f"payload={row.get('payload_hex') or '-'} "
+                f"brightness={row.get('decoded_brightness_percent')} "
+                f"color={row.get('decoded_color') or '-'} mode={row.get('decoded_mode') or '-'}"
+            )
+        return 0
+
+    if args.ble_command == "button-probe":
+        keys = _normalize_probe_keys(
+            getattr(args, "key", None),
+            default_keys=DEFAULT_BT_BUTTON_PROBE_KEYS,
+        )
+        attempts = max(1, int(getattr(args, "attempts", 1)))
+        rows: list[dict[str, Any]] = []
+        decoded_mapping: dict[str, str] = {}
+        selected_keys: dict[str, str] = {}
+        seen_reject = False
+        seen_parameter_error = False
+
+        requested_address = str(getattr(args, "address", "") or "").strip()
+        resolution = _resolve_probe_target(requested_address=requested_address, timeout=float(args.timeout))
+        probe_address = resolution["probe_address"]
+        resolved_from = resolution["resolved_from"]
+        resolved_address = resolution["resolved_address"]
+        resolution_error = resolution["resolution_error"]
+        fallback_to_mac = False
+
+        for round_idx in range(attempts):
+            for key in keys:
+                candidate_addresses = _candidate_probe_addresses(
+                    requested_address=requested_address,
+                    probe_address=probe_address,
+                    fallback_to_mac=fallback_to_mac,
+                )
+
+                row_emitted = False
+                last_error: Optional[str] = None
+                for candidate_address in candidate_addresses:
+                    used_fallback = bool(
+                        _is_mac_address(requested_address)
+                        and candidate_address == requested_address
+                        and candidate_address != probe_address
+                    )
+                    try:
+                        result = ble_vendor_transceive(
+                            address=candidate_address,
+                            name_query=getattr(args, "name", None),
+                            timeout=float(args.timeout),
+                            key=key,
+                            value_payload=None,
+                            response_timeout=float(args.response_timeout),
+                            write_with_response=True,
+                            notify_enabled=True,
+                        )
+                        vendor_decode = result.get("vendor_decode") if isinstance(result, dict) else {}
+                        if not isinstance(vendor_decode, dict):
+                            vendor_decode = {}
+                        payload_hex = str(vendor_decode.get("payload_hex") or "").strip().lower()
+                        status = str(vendor_decode.get("status") or "").strip().lower() or None
+                        status_code_raw = vendor_decode.get("status_code")
+                        try:
+                            status_code = int(status_code_raw) if status_code_raw is not None else None
+                        except Exception:
+                            status_code = None
+
+                        if status_code == 3:
+                            seen_reject = True
+                        if status_code == 5:
+                            seen_parameter_error = True
+
+                        slot: Optional[int] = None
+                        button_name: Optional[str] = None
+                        if len(key) == 4 and key[:3] == bytes.fromhex("088401"):
+                            slot = int(key[3])
+                            button_name = MacOSBleBackend._button_name_from_slot(slot)
+
+                        decode_allowed = bool(
+                            status_code == 2
+                            or status == "success"
+                            or (status_code is None and not status)
+                        )
+                        decoded_action: Optional[str] = None
+                        if decode_allowed and slot is not None and payload_hex:
+                            try:
+                                payload_bytes = bytes.fromhex(payload_hex)
+                            except ValueError:
+                                payload_bytes = b""
+                            if payload_bytes:
+                                decoded_action = MacOSBleBackend._decode_ble_button_payload(slot, payload_bytes)
+
+                        row: dict[str, Any] = {
+                            "round": int(round_idx + 1),
+                            "probe": "button",
+                            "key_hex": key.hex(),
+                            "used_address": candidate_address,
+                            "used_fallback_address": bool(used_fallback),
+                            "status": status,
+                            "status_code": status_code,
+                            "payload_hex": payload_hex,
+                            "payload_len": len(payload_hex) // 2 if payload_hex else 0,
+                            "slot": slot,
+                            "button": button_name,
+                            "decoded_action": decoded_action,
+                        }
+                        rows.append(row)
+                        if button_name and decoded_action and button_name not in decoded_mapping:
+                            decoded_mapping[button_name] = decoded_action
+                            selected_keys[button_name] = key.hex()
+                        if used_fallback:
+                            fallback_to_mac = True
+                        row_emitted = True
+                        break
+                    except Exception as exc:
+                        last_error = str(exc)
+                        if used_fallback:
+                            fallback_to_mac = True
+                        if _is_device_not_found_error(last_error) and _is_mac_address(requested_address):
+                            continue
+                        rows.append(
+                            {
+                                "round": int(round_idx + 1),
+                                "probe": "button",
+                                "key_hex": key.hex(),
+                                "used_address": candidate_address,
+                                "used_fallback_address": bool(used_fallback),
+                                "error": last_error,
+                            }
+                        )
+                        row_emitted = True
+                        break
+
+                if not row_emitted:
+                    rows.append(
+                        {
+                            "round": int(round_idx + 1),
+                            "probe": "button",
+                            "key_hex": key.hex(),
+                            "used_address": requested_address or probe_address,
+                            "used_fallback_address": bool(_is_mac_address(requested_address)),
+                            "error": last_error or "Unknown BLE button probe error",
+                        }
+                    )
+
+        if decoded_mapping:
+            result_status = "ok"
+        elif seen_reject or seen_parameter_error:
+            result_status = "unsupported"
+        elif any("error" in row for row in rows):
+            result_status = "transport-error"
+        else:
+            result_status = "error"
+
+        payload = {
+            "status": result_status,
+            "attempts": attempts,
+            "keys": [key.hex() for key in keys],
+            "results": rows,
+            "decoded": {
+                "mapping": dict(decoded_mapping),
+            },
+            "selected_keys": dict(selected_keys),
+            "mac_fallback_active": bool(fallback_to_mac),
+        }
+        if resolved_from and resolved_address:
+            payload["auto_resolution"] = {
+                "requested_mac": resolved_from,
+                "resolved_address": resolved_address,
+            }
+        if resolution_error:
+            payload["auto_resolution_error"] = resolution_error
+
+        if args.json:
+            emit(payload, as_json=True)
+            return 0
+
+        print(
+            f"status={payload['status']} "
+            f"decoded_buttons={len(decoded_mapping)}"
+        )
+        for row in rows:
+            if row.get("error"):
+                print(
+                    f"round={row.get('round')} key={row.get('key_hex')} error={row.get('error')}"
+                )
+                continue
+            print(
+                f"round={row.get('round')} key={row.get('key_hex')} "
+                f"button={row.get('button') or '-'} action={row.get('decoded_action') or '-'} "
+                f"status={row.get('status') or '-'} status_code={row.get('status_code')} "
+                f"payload={row.get('payload_hex') or '-'}"
+            )
+        return 0
+
     if args.ble_command == "poll-probe":
         keys = _normalize_probe_keys(
             getattr(args, "key", None),
@@ -606,6 +1139,7 @@ def handle_ble(args: argparse.Namespace) -> int:
         round_resolution_errors: list[dict[str, Any]] = []
 
         requested_address = str(getattr(args, "address", "") or "").strip()
+        _require_ble_mac_address_for_bank_commands(requested_address)
         resolution = _resolve_probe_target(requested_address=requested_address, timeout=float(args.timeout))
         probe_address = resolution["probe_address"]
         resolved_from = resolution["resolved_from"]
@@ -806,19 +1340,35 @@ def handle_ble(args: argparse.Namespace) -> int:
             }
             if payload.get("auto_resolution"):
                 snapshot["auto_resolution"] = payload["auto_resolution"]
-            try:
-                saved = append_bank_snapshot(
-                    snapshot=snapshot,
-                    path_override=getattr(args, "path", None),
-                )
-            except Exception as exc:
-                raise RazeCliError(f"Could not save BLE bank snapshot: {exc}") from exc
-            payload["snapshot"] = {
-                "path": saved.get("path"),
-                "count": saved.get("count"),
-                "captured_at": snapshot["captured_at"],
-                "label": snapshot.get("label"),
-            }
+            primary_sig = str(payload.get("primary_bank_signature") or "").strip()
+            ok_to_save = payload.get("status") == "ok" and bool(primary_sig)
+            if ok_to_save:
+                try:
+                    saved = append_bank_snapshot(
+                        snapshot=snapshot,
+                        path_override=getattr(args, "path", None),
+                    )
+                except Exception as exc:
+                    raise RazeCliError(f"Could not save BLE bank snapshot: {exc}") from exc
+                payload["snapshot"] = {
+                    "saved": True,
+                    "path": saved.get("path"),
+                    "count": saved.get("count"),
+                    "captured_at": snapshot["captured_at"],
+                    "label": snapshot.get("label"),
+                }
+            else:
+                reasons: list[str] = []
+                if payload.get("status") != "ok":
+                    reasons.append(f"status={payload.get('status')}")
+                if not primary_sig:
+                    reasons.append("missing primary_bank_signature")
+                payload["snapshot"] = {
+                    "saved": False,
+                    "reason": "; ".join(reasons) if reasons else "capture_incomplete",
+                    "captured_at": snapshot["captured_at"],
+                    "label": snapshot.get("label"),
+                }
 
         if args.json:
             emit(payload, as_json=True)
@@ -841,10 +1391,16 @@ def handle_ble(args: argparse.Namespace) -> int:
             )
         if args.ble_command == "bank-snapshot":
             snapshot_meta = payload.get("snapshot") or {}
-            print(
-                f"snapshot_path={snapshot_meta.get('path') or '-'} "
-                f"snapshot_count={snapshot_meta.get('count')}"
-            )
+            if snapshot_meta.get("saved") is True:
+                print(
+                    f"snapshot_saved=yes path={snapshot_meta.get('path') or '-'} "
+                    f"count={snapshot_meta.get('count')}"
+                )
+            else:
+                print(
+                    f"snapshot_saved=no reason={snapshot_meta.get('reason') or '-'} "
+                    f"(fix errors and retry; nothing was appended to the snapshot store)"
+                )
         return 0
 
     if args.ble_command == "bank-compare":

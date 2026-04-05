@@ -5,7 +5,7 @@ from __future__ import annotations
 import curses
 import textwrap
 import time
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 
 class TuiViewMixin:
@@ -25,6 +25,10 @@ class TuiViewMixin:
     @staticmethod
     def _loading_dots() -> str:
         return "." * (1 + (int(time.monotonic() * 3.0) % 3))
+
+    def _loading_label(self) -> str:
+        dots = self._loading_dots()
+        return f"Loading{dots:<3}"
 
     def _busy_label(self) -> str:
         job_label = str(getattr(self, "_job_label", "") or "").strip()
@@ -305,37 +309,55 @@ class TuiViewMixin:
         caps = ", ".join(sorted(selected.capabilities)) if selected.capabilities else "-"
         lines.append(f"Capabilities: {caps}")
 
-        bt_008e = self._is_bt_008e(selected)
+        bt_endpoint = self._is_ble_endpoint_device(selected)
         dpi_text = "-" if self.state.dpi is None else f"{self.state.dpi[0]}:{self.state.dpi[1]}"
-        if bt_008e and self.state.dpi is None:
+        if bt_endpoint and self.state.dpi is None:
             dpi_text = "N/A (BT limited)"
         if self.state.dpi_active_stage is None or not self.state.dpi_stages:
             dpi_profile_text = "-"
         else:
             dpi_profile_text = f"{self.state.dpi_active_stage}/{len(self.state.dpi_stages)}"
-        if bt_008e and (self.state.dpi_active_stage is None or not self.state.dpi_stages):
+        if bt_endpoint and (self.state.dpi_active_stage is None or not self.state.dpi_stages):
             dpi_profile_text = "N/A (BT limited)"
         poll_supported = "poll-rate" in selected.capabilities
         poll_text = "-" if self.state.poll_rate is None else f"{self.state.poll_rate} Hz"
         if self.state.poll_rate is None:
-            if bt_008e:
+            if bt_endpoint:
                 poll_text = "N/A (use USB/2.4 for poll-rate)"
             elif poll_supported and not loading_selected:
                 poll_text = "Unavailable"
         battery_text = "-" if self.state.battery is None else f"{self.state.battery}%"
-        if bt_008e and self.state.battery is None:
+        if bt_endpoint and self.state.battery is None:
             battery_text = "N/A (BT limited)"
 
         rgb_cache = getattr(self, "_rgb_cache", None)
         rgb_state = rgb_cache.get(selected.identifier) if isinstance(rgb_cache, dict) else None
+        rgb_confidence_label: Optional[str] = None
+        rgb_loading = False
+        if "rgb" in selected.capabilities:
+            inflight_checker = getattr(self, "_is_feature_prefetch_inflight", None)
+            if callable(inflight_checker):
+                try:
+                    rgb_loading = bool(inflight_checker(selected.identifier, "rgb"))
+                except Exception:
+                    rgb_loading = False
         if isinstance(rgb_state, dict):
             rgb_mode = str(rgb_state.get("mode") or "-")
             rgb_brightness = rgb_state.get("brightness")
             rgb_color = str(rgb_state.get("color") or "------")
+            confidence = rgb_state.get("read_confidence")
+            if isinstance(confidence, dict):
+                overall = str(confidence.get("overall") or "").strip().lower()
+                if overall:
+                    rgb_confidence_label = overall
             if isinstance(rgb_brightness, int):
                 rgb_text = f"{rgb_mode} {rgb_brightness}% #{rgb_color}"
             else:
                 rgb_text = f"{rgb_mode} #{rgb_color}"
+            if rgb_confidence_label:
+                rgb_text = f"{rgb_text} [{rgb_confidence_label}]"
+        elif rgb_loading:
+            rgb_text = f"{self._loading_label()} (press g to open)"
         elif "rgb" in selected.capabilities:
             rgb_text = "Not loaded (press g)"
         else:
@@ -343,13 +365,33 @@ class TuiViewMixin:
 
         button_cache = getattr(self, "_button_mapping_cache", None)
         button_state = button_cache.get(selected.identifier) if isinstance(button_cache, dict) else None
+        button_confidence_label: Optional[str] = None
+        button_loading = False
+        if "button-mapping" in selected.capabilities:
+            inflight_checker = getattr(self, "_is_feature_prefetch_inflight", None)
+            if callable(inflight_checker):
+                try:
+                    button_loading = bool(inflight_checker(selected.identifier, "button-mapping"))
+                except Exception:
+                    button_loading = False
         button_text = "-"
         if isinstance(button_state, dict):
             mapping = button_state.get("mapping")
+            confidence = button_state.get("read_confidence")
+            if isinstance(confidence, dict):
+                overall = str(confidence.get("overall") or "").strip().lower()
+                if overall:
+                    button_confidence_label = overall
             if isinstance(mapping, dict) and mapping:
                 side_1 = str(mapping.get("side_1") or "-")
                 side_2 = str(mapping.get("side_2") or "-")
                 button_text = f"side_1={side_1}, side_2={side_2}"
+                if button_confidence_label:
+                    button_text = f"{button_text} [{button_confidence_label}]"
+            elif button_confidence_label:
+                button_text = f"- [{button_confidence_label}]"
+        elif button_loading:
+            button_text = f"{self._loading_label()} (press b to open)"
         elif "button-mapping" in selected.capabilities:
             button_text = "Not loaded (press b)"
 
@@ -364,19 +406,36 @@ class TuiViewMixin:
                 f"Buttons: {button_text}",
             ]
         )
-        if selected.model_id == "deathadder-v2-pro" and "dpi-stages" in selected.capabilities:
+        if (
+            self._has_onboard_profile_bank_switch(selected)
+            and "dpi-stages" in selected.capabilities
+            and bt_endpoint
+            and self.state.onboard_bank_signature
+        ):
+            sig = str(self.state.onboard_bank_signature).strip()
+            match = str(self.state.onboard_bank_match or "").strip()
+            if match:
+                bank_line = f"Onboard profile: matches snapshot(s) {match} (fp={sig})"
+            else:
+                bank_line = (
+                    f"Onboard profile fp={sig} (no snapshot match — "
+                    f"switch underside bank + ble bank-snapshot --label …)"
+                )
+            lines.extend(["", bank_line])
+        elif self._has_onboard_profile_bank_switch(selected) and "dpi-stages" in selected.capabilities:
             lines.extend(
                 [
                     "",
-                    "Tip: Underside profile button can switch onboard profile bank.",
-                    "Different banks can have different DPI stage lists.",
+                    "Tip: Underside profile button switches onboard bank; BLE DPI applies per bank.",
+                    "Save `ble bank-snapshot --label …` to label each bank; TUI shows fp match when known.",
                 ]
             )
-        if bt_008e:
+        if bt_endpoint:
+            pid_label = self._usb_pid_label(selected)
             lines.extend(
                 [
                     "",
-                    "Bluetooth endpoint detected (1532:008E).",
+                    f"Bluetooth endpoint detected ({pid_label}).",
                     "Control/reads are experimental on macOS; USB/2.4 is recommended.",
                 ]
             )
@@ -509,8 +568,9 @@ class TuiViewMixin:
         actions_primary = "Nav: [up/down,k/j] select  [r] refresh  [g] RGB  [b] buttons  [?] help  [q] quit"
         selected = self._selected()
         poll_hint = "  [p] poll-rate" if bool(selected and "poll-rate" in selected.capabilities) else ""
+        dpi_step = max(1, int(getattr(self, "_dpi_adjust_step", 100)))
         actions_secondary = (
-            f"Edit: [+/-] DPI  [d] custom  [s] next profile  [n] DPI levels{poll_hint}  [[/]] split"
+            f"Edit: [+/-] DPI({dpi_step})  [d] custom  [s] next profile  [n] DPI levels{poll_hint}  [[/]] split"
         )
         self._safe_add(stdscr, height - 3, pad_x, actions_primary, self._ui_attr("footer", curses.A_BOLD))
         self._safe_add(stdscr, height - 2, pad_x, actions_secondary, self._ui_attr("footer", curses.A_BOLD))

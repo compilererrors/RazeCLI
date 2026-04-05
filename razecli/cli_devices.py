@@ -22,9 +22,18 @@ def handle_devices(service: DeviceService, args: argparse.Namespace) -> int:
         if not devices:
             print("No Razer devices found")
             if args.backend == "macos-ble":
+                endpoint_pids = set()
+                for model in service.registry.iter():
+                    for token in tuple(getattr(model, "ble_endpoint_product_ids", ()) or ()):
+                        try:
+                            endpoint_pids.add(int(token))
+                        except Exception:
+                            continue
+                pid_list = ", ".join(f"1532:{pid:04X}" for pid in sorted(endpoint_pids))
                 print(
-                    "Hint: macos-ble is Bluetooth-only (PID 1532:008E). "
-                    "Switch the mouse to BT mode and confirm it is connected in macOS."
+                    "Hint: macos-ble is Bluetooth-only"
+                    + (f" (known BT endpoint PIDs: {pid_list}). " if pid_list else ". ")
+                    + "Switch the mouse to BT mode and confirm it is connected in macOS."
                 )
             backend_errors = service.backend_errors()
             if backend_errors:
@@ -42,4 +51,3 @@ def handle_devices(service: DeviceService, args: argparse.Namespace) -> int:
             )
 
     return 0
-

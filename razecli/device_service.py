@@ -16,6 +16,8 @@ from razecli.types import DetectedDevice
 
 
 class DeviceService:
+    _CLASS_REGISTRY = ModelRegistry.load()
+
     def __init__(self, backend_mode: str = "auto") -> None:
         self.registry = ModelRegistry.load()
         self.backends = self._build_backends(backend_mode)
@@ -70,13 +72,24 @@ class DeviceService:
         return (device.backend, device.model_id, serial_key)
 
     @staticmethod
-    def _rawhid_preference_key(device: DetectedDevice) -> Tuple[int, int, int, str]:
+    def _rawhid_transport_rank(model_id: Optional[str], product_id: int) -> int:
+        slug = str(model_id or "").strip().lower()
+        model = DeviceService._CLASS_REGISTRY.get(slug) if slug else None
+        raw = tuple(getattr(model, "rawhid_transport_priority", ()) or ())
+        pid_order: Dict[int, int] = {}
+        for idx, token in enumerate(raw):
+            try:
+                pid_order[int(token)] = int(idx)
+            except Exception:
+                continue
+        if not pid_order:
+            return 3
+        return pid_order.get(int(product_id), len(pid_order) + 3)
+
+    @classmethod
+    def _rawhid_preference_key(cls, device: DetectedDevice) -> Tuple[int, int, int, str]:
         # Prefer reliable transport endpoints when one physical mouse appears on multiple links.
-        pid_rank = {
-            0x007C: 0,  # wired USB
-            0x007D: 1,  # 2.4GHz dongle
-            0x008E: 5,  # Bluetooth endpoint (experimental)
-        }.get(device.product_id, 3)
+        pid_rank = cls._rawhid_transport_rank(device.model_id, device.product_id)
         handle = device.backend_handle if isinstance(device.backend_handle, dict) else {}
         profile = handle.get("profile")
         experimental_rank = 1 if getattr(profile, "experimental", False) else 0

@@ -17,6 +17,30 @@ from razecli.tui_actions import TuiActionsMixin
 from razecli.tui_types import DPI_STEP, DeviceState
 from razecli.tui_view import TuiViewMixin
 
+# While `_job_label` is set (state refresh, discovery, etc.), most keys are ignored so the
+# UI does not stack work. Editors and DPI shortcuts stay allowed so g/b/n still open menus
+# immediately while RGB/button lines load in the background.
+_TUI_KEYS_ALLOWED_DURING_BACKGROUND_JOB = frozenset(
+    {
+        curses.KEY_UP,
+        curses.KEY_DOWN,
+        ord("k"),
+        ord("j"),
+        ord("?"),
+        ord("["),
+        ord("]"),
+        ord("g"),
+        ord("b"),
+        ord("n"),
+        ord("d"),
+        ord("s"),
+        ord("p"),
+        ord("+"),
+        ord("="),
+        ord("-"),
+    }
+)
+
 
 class TuiController(TuiViewMixin, TuiActionsMixin):
     @staticmethod
@@ -457,9 +481,10 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             return
 
         feature_targets: list[tuple[str, dict[str, dict[str, Any]], str]] = []
-        if "rgb" in device.capabilities and device.identifier not in self._rgb_cache:
+        dev_cache_key = str(device.identifier)
+        if "rgb" in device.capabilities and dev_cache_key not in self._rgb_cache:
             feature_targets.append(("rgb", self._rgb_cache, "get_rgb"))
-        if "button-mapping" in device.capabilities and device.identifier not in self._button_mapping_cache:
+        if "button-mapping" in device.capabilities and dev_cache_key not in self._button_mapping_cache:
             feature_targets.append(("button-mapping", self._button_mapping_cache, "get_button_mapping"))
         if not feature_targets:
             return
@@ -615,15 +640,7 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
                     return 0
                 if key == 27:
                     return 0
-                if self._job_label and key not in (
-                    curses.KEY_UP,
-                    ord("k"),
-                    curses.KEY_DOWN,
-                    ord("j"),
-                    ord("?"),
-                    ord("["),
-                    ord("]"),
-                ):
+                if self._job_label and key not in _TUI_KEYS_ALLOWED_DURING_BACKGROUND_JOB:
                     self._set_status(
                         f"{self._job_label} in progress...",
                         hold_seconds=0.8,

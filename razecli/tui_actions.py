@@ -1840,8 +1840,10 @@ class TuiActionsMixin:
         ).start()
 
         stdscr.timeout(80)
+        paint_frame = 0
         try:
             while not done.is_set():
+                paint_frame += 1
                 self._draw_modal_box(
                     stdscr,
                     title=title,
@@ -1851,6 +1853,7 @@ class TuiActionsMixin:
                         f"{self._spinner()} Please wait",
                     ],
                     footer=f"{footer} | Esc cancels",
+                    dim_full_screen=(paint_frame == 1),
                 )
                 key = stdscr.getch()
                 if key in (27, ord("q")):
@@ -1890,8 +1893,10 @@ class TuiActionsMixin:
         ).start()
 
         stdscr.timeout(80)
+        paint_frame = 0
         try:
             while not done.is_set():
+                paint_frame += 1
                 self._draw_modal_box(
                     stdscr,
                     title=title,
@@ -1901,6 +1906,7 @@ class TuiActionsMixin:
                         f"{self._spinner()} Please wait",
                     ],
                     footer=footer,
+                    dim_full_screen=(paint_frame == 1),
                 )
                 _ = stdscr.getch()
             error = payload.get("error")
@@ -1924,7 +1930,7 @@ class TuiActionsMixin:
 
         rgb_cache = getattr(self, "_rgb_cache", None)
         if isinstance(rgb_cache, dict):
-            rgb_cache[device.identifier] = dict(state)
+            rgb_cache[str(device.identifier)] = dict(state)
         return dict(state)
 
     def _read_button_mapping_for_ui(self, device: DetectedDevice) -> Dict[str, Any]:
@@ -1941,7 +1947,7 @@ class TuiActionsMixin:
 
         mapping_cache = getattr(self, "_button_mapping_cache", None)
         if isinstance(mapping_cache, dict):
-            mapping_cache[device.identifier] = dict(state)
+            mapping_cache[str(device.identifier)] = dict(state)
         return dict(state)
 
     def _read_button_actions_for_ui(self, device: DetectedDevice, mapping: Dict[str, Any]) -> List[str]:
@@ -1963,6 +1969,78 @@ class TuiActionsMixin:
             if cleaned:
                 return cleaned
         return []
+
+    @staticmethod
+    def _button_actions_from_mapping_state(mapping_state: Dict[str, Any]) -> List[str]:
+        fallback = mapping_state.get("actions_suggested")
+        if isinstance(fallback, list):
+            cleaned = [str(item).strip() for item in fallback if str(item).strip()]
+            if cleaned:
+                return cleaned
+        return []
+
+    def _cached_rgb_state(self, device: DetectedDevice) -> Optional[Dict[str, Any]]:
+        rgb_cache = getattr(self, "_rgb_cache", None)
+        if not isinstance(rgb_cache, dict):
+            return None
+        for key in (str(device.identifier), device.identifier):
+            if key in rgb_cache:
+                raw = rgb_cache[key]
+                if isinstance(raw, dict) and raw:
+                    return dict(raw)
+        return None
+
+    def _cached_button_mapping_state(self, device: DetectedDevice) -> Optional[Dict[str, Any]]:
+        cache = getattr(self, "_button_mapping_cache", None)
+        if not isinstance(cache, dict):
+            return None
+        for key in (str(device.identifier), device.identifier):
+            if key in cache:
+                raw = cache[key]
+                if isinstance(raw, dict) and raw:
+                    return dict(raw)
+        return None
+
+    def _schedule_rgb_cache_warm(self, device: DetectedDevice) -> None:
+        """Fill ``_rgb_cache`` from hardware without blocking the UI (prefetch may already run)."""
+        inflight = getattr(self, "_is_feature_prefetch_inflight", None)
+        if callable(inflight) and inflight(str(device.identifier), "rgb"):
+            return
+        if self._cached_rgb_state(device) is not None:
+            return
+        target = device
+
+        def _run() -> None:
+            try:
+                self._read_rgb_state_for_ui(target)
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_run,
+            daemon=True,
+            name="razecli-warm-rgb",
+        ).start()
+
+    def _schedule_button_mapping_cache_warm(self, device: DetectedDevice) -> None:
+        inflight = getattr(self, "_is_feature_prefetch_inflight", None)
+        if callable(inflight) and inflight(str(device.identifier), "button-mapping"):
+            return
+        if self._cached_button_mapping_state(device) is not None:
+            return
+        target = device
+
+        def _run() -> None:
+            try:
+                self._read_button_mapping_for_ui(target)
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_run,
+            daemon=True,
+            name="razecli-warm-buttons",
+        ).start()
 
     def _apply_rgb_state(
         self,
@@ -1998,7 +2076,7 @@ class TuiActionsMixin:
         result["hardware_apply"] = hardware_apply
         rgb_cache = getattr(self, "_rgb_cache", None)
         if isinstance(rgb_cache, dict):
-            rgb_cache[device.identifier] = dict(result)
+            rgb_cache[str(device.identifier)] = dict(result)
         return result
 
     def _select_menu(
@@ -2147,24 +2225,18 @@ class TuiActionsMixin:
             return
 
         try:
-            loaded = self._load_with_modal(
-                stdscr,
-                title="RGB Editor",
-                description="Loading RGB state",
-                loader=lambda: (
-                    self._read_rgb_state_for_ui(device),
-                    get_rgb_presets(model_id=device.model_id),
-                ),
-                footer="Preparing RGB editor",
-            )
-        except Exception as exc:
-            self._set_status(f"Could not load RGB state: {exc}", hold_seconds=8.0)
-            return
-        if loaded is None:
-            return
-        current_raw, presets_raw = loaded
-        current = dict(current_raw) if isinstance(current_raw, dict) else get_rgb_scaffold(model_id=device.model_id)
+            presets_raw = get_rgb_presets(model_id=device.model_id)
+        except Exception:
+            presets_raw = {}
         presets = dict(presets_raw) if isinstance(presets_raw, dict) else get_rgb_presets(model_id=device.model_id)
+
+        cached_rgb = self._cached_rgb_state(device)
+        if cached_rgb is not None:
+            current_raw: Dict[str, Any] = dict(cached_rgb)
+        else:
+            current_raw = dict(get_rgb_scaffold(model_id=device.model_id))
+            self._schedule_rgb_cache_warm(device)
+        current = dict(current_raw) if isinstance(current_raw, dict) else get_rgb_scaffold(model_id=device.model_id)
 
         def _sync_from_state(state: Dict[str, Any]) -> Tuple[str, int, str, set[str], Sequence[Any]]:
             mode = str(state.get("mode") or "off").strip().lower()
@@ -2457,7 +2529,7 @@ class TuiActionsMixin:
         result["hardware_apply"] = hardware_apply
         mapping_cache = getattr(self, "_button_mapping_cache", None)
         if isinstance(mapping_cache, dict):
-            mapping_cache[device.identifier] = dict(result)
+            mapping_cache[str(device.identifier)] = dict(result)
         return result
 
     def _edit_button_mapping(self, stdscr) -> None:
@@ -2483,19 +2555,30 @@ class TuiActionsMixin:
             actions_local = self._read_button_actions_for_ui(device, state)
             return state, mapping_dict, buttons_local, actions_local
 
-        try:
-            loaded = self._load_with_modal(
-                stdscr,
-                title="Button Mapping",
-                description="Loading button map",
-                loader=_load_button_data,
-                footer="Preparing button editor",
-            )
-        except Exception as exc:
-            self._set_status(f"Could not load button mapping: {exc}", hold_seconds=8.0)
-            return
-        if loaded is None:
-            return
+        def _button_tuple_from_state(state: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str], List[str]]:
+            mapping_local = state.get("mapping")
+            mapping_dict = dict(mapping_local) if isinstance(mapping_local, dict) else {}
+            buttons_raw_local = state.get("buttons_supported")
+            buttons_local = [str(item).strip() for item in (buttons_raw_local or []) if str(item).strip()]
+            if not buttons_local:
+                buttons_local = list(mapping_dict.keys())
+            actions_local = self._button_actions_from_mapping_state(state)
+            if not actions_local:
+                actions_local = self._read_button_actions_for_ui(device, state)
+            return state, mapping_dict, buttons_local, actions_local
+
+        cached_btn = self._cached_button_mapping_state(device)
+        if cached_btn is not None:
+            loaded: Tuple[Dict[str, Any], Dict[str, Any], List[str], List[str]] = _button_tuple_from_state(cached_btn)
+        else:
+            scaffold_state = dict(get_button_mapping_scaffold(model_id=device.model_id))
+            loaded = _button_tuple_from_state(scaffold_state)
+            _st, _mp, buttons_try, _ac = loaded
+            if not buttons_try:
+                loaded = _button_tuple_from_state(
+                    dict(get_button_mapping_scaffold(model_id="deathadder-v2-pro"))
+                )
+            self._schedule_button_mapping_cache_warm(device)
 
         mapping_state, mapping, buttons, actions = loaded
         if not buttons:
@@ -2518,6 +2601,7 @@ class TuiActionsMixin:
                 title="Button Mapping",
                 body_lines=lines,
                 footer="Choose button, then map action. Right panel visualizes button slots.",
+                dim_full_screen=False,
             )
             key = stdscr.getch()
             if key in (curses.KEY_UP, ord("k")):

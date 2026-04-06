@@ -60,6 +60,12 @@ class RawHidMappingTest(unittest.TestCase):
         self.assertIn(0x0084, PID_PROFILES)
         self.assertIn(0x008C, PID_PROFILES)
         self.assertIn(0x0083, PID_PROFILES)
+        self.assertIn(0x0099, PID_PROFILES)
+        self.assertIn(0x00AA, PID_PROFILES)
+        self.assertIn(0x00B9, PID_PROFILES)
+        self.assertIn(0x005C, PID_PROFILES)
+        self.assertIn(0x00B6, PID_PROFILES)
+        self.assertIn(0x00C0, PID_PROFILES)
 
         self.assertIn("dpi", PID_PROFILES[0x0084].capabilities)
         self.assertNotIn("battery", PID_PROFILES[0x0084].capabilities)

@@ -45,6 +45,14 @@ class ModelRegistryTest(unittest.TestCase):
         assert model is not None
         self.assertEqual(model.slug, "deathadder-v2-pro")
 
+    def test_find_by_name_prefers_most_specific_basilisk_match(self):
+        registry = ModelRegistry.load()
+
+        model = registry.find_by_name("Razer Basilisk V3 X HyperSpeed")
+        self.assertIsNotNone(model)
+        assert model is not None
+        self.assertEqual(model.slug, "basilisk-v3-x-hyperspeed")
+
     def test_loads_additional_models(self):
         registry = ModelRegistry.load()
 
@@ -83,6 +91,38 @@ class ModelRegistryTest(unittest.TestCase):
         endpoint_pids = registry.ble_endpoint_product_ids()
         self.assertIn(0x008E, endpoint_pids)
         self.assertIn(0x0083, endpoint_pids)
+        self.assertIn(0x00AC, endpoint_pids)
+        self.assertIn(0x00BA, endpoint_pids)
+        self.assertIn(0x0095, endpoint_pids)
+
+    def test_loads_basilisk_v3_family_and_aliases(self):
+        registry = ModelRegistry.load()
+
+        b3 = registry.get("basilisk-v3")
+        self.assertIsNotNone(b3)
+        assert b3 is not None
+        self.assertIn((0x1532, 0x0099), b3.usb_ids)
+
+        b3p = registry.get("basilisk-v3-pro")
+        self.assertIsNotNone(b3p)
+        assert b3p is not None
+        self.assertIn((0x1532, 0x00AC), b3p.usb_ids)
+        self.assertEqual(tuple(b3p.ble_endpoint_product_ids), (0x00AC,))
+
+        b3x = registry.get("basilisk-v3-x-hyperspeed")
+        self.assertIsNotNone(b3x)
+        assert b3x is not None
+        self.assertIn((0x1532, 0x00B9), b3x.usb_ids)
+        self.assertIn((0x1532, 0x00BA), b3x.usb_ids)
+
+        self.assertIsNotNone(registry.get("basilisk-v3-35k"))
+        self.assertIsNotNone(registry.get("basilisk-v3-pro-35k"))
+        self.assertIsNotNone(registry.get("viper-v2-pro"))
+        self.assertIsNotNone(registry.get("deathadder-v3"))
+        self.assertIsNotNone(registry.get("deathadder-v3-pro"))
+        self.assertIsNotNone(registry.get("deathadder-v4-pro"))
+        self.assertIsNotNone(registry.get("viper-v3-pro"))
+        self.assertIsNotNone(registry.get("orochi-v2"))
 
 
 if __name__ == "__main__":

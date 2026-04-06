@@ -1,7 +1,9 @@
 """Experimental macOS BLE backend for Razer BT endpoints.
 
 Implements vendor-GATT transactions over macOS CoreBluetooth for Bluetooth PID
-endpoints (currently validated for DA V2 Pro `0x008E`).
+endpoints. DA V2 Pro (`0x008E`) is field-validated; additional PIDs from
+`ModelSpec.ble_endpoint_product_ids` reuse the same OpenSnek-class key catalog
+but remain model-gated (`ble_endpoint_experimental`, RGB mode lists, etc.).
 """
 
 from __future__ import annotations
@@ -807,6 +809,16 @@ class MacOSBleBackend(Backend):
             rgb = bytes.fromhex(color_hex)
             # Keep seed color in payload while selecting random breathing profile.
             return bytes([0x02, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2], 0x00, 0x00])
+        # V3 Pro–class BLE (OpenSnek): one 10-byte row to 10030000 — zone 0x01 (scroll), effect in byte 3
+        # (0x01 static, 0x04 spectrum per matrix-style ids). Legacy 4-byte 0x03 + 1084 frame alone
+        # did not apply static on DA V2 Pro BT; 4-byte 0x08 for spectrum was ignored → stayed static green.
+        if mode_value == "static":
+            rgb = bytes.fromhex(color_hex)
+            return bytes([0x01, 0x00, 0x00, 0x01, rgb[0], rgb[1], rgb[2], 0x00, 0x00, 0x00])
+        if mode_value == "spectrum":
+            return bytes([0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        if mode_value == "off":
+            return bytes([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         return MacOSBleBackend._rgb_mode_selector_payload(mode_value)
 
     @staticmethod
@@ -2288,7 +2300,10 @@ class MacOSBleBackend(Backend):
                 selector_payload = self._rgb_mode_write_payload(mode=mode_value, color_hex=color_hex)
                 mode_write_ok = False
 
-                if mode_value in {"static", "breathing-single"}:
+                # Legacy 1084 frame + breathing 10-byte mode is validated on DA V2 Pro BT; static uses
+                # 10-byte zone row only (see _rgb_mode_write_payload). Spectrum/off must not get a
+                # static color frame or they snap back to solid green.
+                if mode_value == "breathing-single":
                     rgb = bytes.fromhex(color_hex)
                     frame_payload = bytes([0x04, 0x00, 0x00, 0x00, 0x00, rgb[0], rgb[1], rgb[2]])
                     frame_result = self._vendor_call(

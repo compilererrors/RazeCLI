@@ -1,87 +1,144 @@
-# DeathAdder V2 Pro Bluetooth (0x008E) Reverse Engineering Plan
+# Razer BLE vendor GATT reverse engineering
+
+This document is the working plan for Bluetooth control of Razer mice on macOS. DeathAdder V2 Pro (`1532:008E`) remains the primary case study because most hands-on validation has happened there. Other models reuse the same GATT framing and key catalog when they declare a Bluetooth product ID in the model registry.
+
+## USB and Bluetooth
+
+USB and the 2.4 GHz dongle path use 90-byte feature reports (command class, command id, arguments, CRC). That matches the layout described in the [OpenRazer USB reverse-engineering wiki](https://github.com/openrazer/openrazer/wiki/Reverse-Engineering-USB-Protocol) and lives in `razecli/backends/rawhid_backend.py`.
+
+Bluetooth is a different transport: vendor GATT write and notify characteristics, 8-byte request headers, and 4-byte keys. Details are in OpenSnek’s BLE protocol write-up; the implementation is in `razecli/backends/macos_ble_backend.py`.
+
+DPI, battery, and lighting are related ideas across USB and BLE, but the bytes on the wire are not interchangeable. Treat each transport separately.
+
+## Reference projects
+
+- [OpenSnek](https://github.com/gh123man/opensnek) — strongest public reference for this BLE stack. Start with [BLE_PROTOCOL.md](https://github.com/gh123man/opensnek/blob/main/docs/protocol/BLE_PROTOCOL.md), then [USB_PROTOCOL.md](https://github.com/gh123man/opensnek/blob/main/docs/protocol/USB_PROTOCOL.md) and [PARITY.md](https://github.com/gh123man/opensnek/blob/main/docs/protocol/PARITY.md) when comparing transports.
+
+- [OpenRazer](https://github.com/openrazer/openrazer) — source of USB product IDs (`driver/razermouse_driver.h`) and the 90-byte report format used on Linux.
+
+- [OpenRGB](https://github.com/calcprogrammer1/OpenRGB) — sometimes useful for device lists and RGB-focused behavior; not the main reference for vendor BLE keys.
+
+- [razer-macos](https://github.com/1kc/razer-macos) and [librazermacos](https://github.com/stickoking/librazermacos) — older macOS efforts; prefer OpenSnek and OpenRazer for protocol-level detail.
 
 ## Goals
 
-- Achieve stable read/write for `dpi`, `dpi-stages`, `poll-rate`, and `battery` in BT mode on macOS.
-- Achieve stable read/write for `rgb` and `button-mapping` in BT mode on macOS.
-- Keep USB/dongle (`007C`/`007D`) behavior isolated from BT experiments.
-- Document command mapping by transport and onboard profile bank.
+- Stable read and write for `dpi`, `dpi-stages`, `poll-rate`, and `battery` over BLE on macOS.
 
-## Known Facts
+- Stable read and write for `rgb` and `button-mapping` over BLE on macOS.
 
-- `007C` (USB) and `007D` (2.4G dongle) work via `rawhid`.
-- `008E` (Bluetooth) is discoverable, but HID feature reports may fail (`send_feature_report failed`).
-- The bottom LED/DPI button can switch onboard banks; the same LED color does not always mean the same absolute DPI across transports.
-- BLE vendor GATT path is now used for `dpi`, `dpi-stages`, `battery`, RGB probing, and button probing on DA V2 Pro.
+- Keep USB and dongle experiments on `rawhid` separate from BLE work where practical.
 
-## What Is Already Mapped
+- Record how commands map per transport and per onboard profile bank.
 
-- `ble bank-probe`, `ble bank-snapshot`, and `ble bank-compare` are available for profile-bank analysis.
-- `ble bank-probe --deep` now probes extra `0x84`-family keys and reports signature groups.
-- Default (non-deep) bank probe/snapshot also tries `0b840101` alongside `0b840100`; shallow `0b840000` alone often yields no DPI payload. **Identical `primary_bank_signature` for two underside banks means the decoded DPI stage tables we read match** — use different per-bank DPI (e.g. `dpi set` / stage edits) or `--deep` if banks still look the same.
-- `ble rgb-probe` reports per-key decode status and current mode selector decoding.
-- `ble button-probe` decodes standard mouse button slots (`left/right/middle/side_1/side_2`) when payload matches known layouts.
-- CLI/TUI RGB and button-mapping flows now expose hardware/local scope plus read confidence (`verified`, `mixed`, `inferred`).
+## Model registry and Bluetooth
 
-## Terminology (User-facing vs RE terms)
+`ModelRegistry.ble_endpoint_product_ids()` collects every `ble_endpoint_product_ids` tuple from `razecli/models/*.py`. `macos-ble` only considers a Bluetooth device if its `product_id` appears in that merged set, unless `RAZECLI_BLE_PRODUCT_IDS` overrides the list.
 
-- User-facing term: `onboard profile`.
-- RE/debug term in code/output: `bank`.
-- These are the same concept for this project.
-- `DPI levels` are the steps cycled by the top DPI buttons near the scroll wheel.
-- `Onboard profile`/`bank` is switched by the bottom profile button and can have its own DPI level table and indicator behavior.
+You can add OpenRazer USB IDs for `rawhid` without enabling BLE. Only set `ble_endpoint_product_ids` when you know the Bluetooth enumeration PID and you have evidence the device speaks the same vendor service as OpenSnek’s captures.
 
-## Code Building Blocks
+Until hardware proves otherwise, keep `ble_endpoint_experimental` set, limit `ble_supported_rgb_modes`, and use `ble_multi_profile_table_limited` where DPI banks are unclear.
 
-- `razecli/backends/macos_ble_backend.py`
-  - Dedicated backend for `008E` on macOS.
-  - Isolates BT from USB/dongle control paths.
-  - Reuses existing packet framing and BLE vendor GATT transport.
+`ModelRegistry.find_by_name()` picks the longest matching product name or alias so similar names (for example Basilisk V3 versus Basilisk V3 X) do not collide.
 
-## Iterative Workflow
+## DeathAdder V2 Pro facts
 
-1. USB baseline
-   - Set known stages on `007C`:
-     - `1700:1700`, `1000:1000`
-   - Verify with `dpi-stages get`.
-2. BT probe with separate backend
-   - Use BT path only:
-     - `python -m razecli.cli --backend macos-ble --json devices`
-     - `python -m razecli.cli --backend macos-ble dpi get --model deathadder-v2-pro`
-3. Collect failure telemetry
-   - For each operation log:
-     - transport, PID, command class/id, report-id, transaction-id, error text.
-4. Validate bank behavior
-   - Press the bottom DPI button between reads.
-   - Record whether `active_stage` and stage list change without explicit writes.
-5. Derive BT-specific deltas
-   - Compare:
-     - report-id (`0x00`, `0x02`)
-     - transaction-id (`0x3F`, `0x1F`, and others)
-     - timing/retry characteristics for reads.
-6. Probe RGB/button mappings
-   - Use `ble rgb-probe` to verify mode/brightness/frame key behavior.
-   - Use `ble button-probe` before/after writes to confirm payload deltas.
-7. Promote mapping when verified
-   - Move `008E` from experimental to stable backend profile.
-   - Add regression tests with recorded response fixtures.
+- `007C` USB and `007D` dongle work through `rawhid`.
 
-## Command Cheat Sheet (Reverse Engineering)
+- `008E` Bluetooth is visible to the host, but HID feature reports often fail; the reliable path is vendor GATT.
 
-Install/update local editable package:
+- The bottom profile control changes banks. LED color is not a reliable stand-in for absolute DPI across transports.
+
+- BLE is used in-tree for DPI, DPI stages, battery, RGB probes, and button probes on this model.
+
+## Already mapped in tooling
+
+- `ble bank-probe`, `ble bank-snapshot`, and `ble bank-compare` for onboard profile banks.
+
+- `ble bank-probe --deep` for extra `0x84` family keys and signature grouping.
+
+- Shallow bank probes also try `0b840101` next to `0b840100`; `0b840000` alone is often empty. If two banks share the same `primary_bank_signature`, the decoded DPI tables match on the wire—change per-bank DPI or use `--deep` if you need clearer separation.
+
+- `ble rgb-probe` for key decode hints and mode selector state.
+
+- `ble button-probe` for standard mouse slots when the payload matches a known layout.
+
+- CLI and TUI expose hardware versus local scope and read confidence (`verified`, `mixed`, `inferred`).
+
+## OpenSnek key catalog
+
+Reads typically use `0x84` in the second key byte; writes use `0x04` in the same family. The following matches what OpenSnek documents and what RazeCLI targets.
+
+### DPI stage table
+
+Read `0b840100`, write `0b040100` (38-byte stage table on write).
+
+### Battery
+
+Read `05810001` (raw) and `05800001` (status). No standard write key in the shared catalog for these.
+
+### RGB frame legacy
+
+Read `10840000`, write `10040000` (8-byte frame style on supported devices).
+
+### RGB mode selector
+
+Read `10830000`, write `10030000` (four-byte little-endian selector payload).
+
+### Button binding
+
+Write `080401` plus slot byte, with a ten-byte action payload. Reads use the `088401` family per slot.
+
+### Sleep timeout
+
+Read `05840000`, write `05040000` (16-bit little-endian seconds). Documented in OpenSnek; not yet exposed as a first-class CLI command—use `ble raw` to experiment.
+
+## Terminology
+
+- Users say onboard profile; debug output may say bank. Same concept.
+
+- DPI levels are the steps behind the top DPI buttons.
+
+- The bottom profile button switches banks; each bank can carry its own stage table and indicator behavior.
+
+## Code locations
+
+- `razecli/backends/macos_ble_backend.py` implements the GATT client, serialization, and key mapping.
+
+- `razecli/models/*.py` holds USB IDs, optional BLE PIDs, RGB policy, `ble_button_decode_layouts`, and experimental flags.
+
+## Iterative workflow
+
+1. Establish a USB baseline on `007C` and confirm with `dpi-stages get`.
+
+2. Switch to BLE only: `python -m razecli.cli --backend macos-ble --json devices` and `dpi get --model <slug>`.
+
+3. Log failures with transport, PID, keys, status bytes, and timeouts.
+
+4. Exercise the bottom profile button between reads to observe bank changes.
+
+5. Note any `rawhid` quirks on Bluetooth HID nodes separately from GATT timing.
+
+6. Run `ble rgb-probe` and `ble button-probe` when RGB or binds are in scope.
+
+7. Tighten `ModelSpec` and add tests in `tests/test_macos_ble_backend.py` once stable.
+
+## Command cheat sheet
+
+Install or refresh the editable package:
 
 ```bash
 python -m pip install -e .
 ```
 
-Device and transport visibility:
+Models and devices:
 
 ```bash
+razecli --json models
 razecli --json devices --all-transports --model deathadder-v2-pro
 razecli --backend macos-ble --json devices --model deathadder-v2-pro
 ```
 
-BLE discovery and service inspection:
+Discovery and services:
 
 ```bash
 razecli --json ble scan --timeout 10
@@ -90,7 +147,7 @@ razecli --json ble services --address F6:F2:0D:4E:D9:30 --timeout 12
 razecli --json ble services --address F6:F2:0D:4E:D9:30 --read --timeout 12
 ```
 
-Alias cache troubleshooting (MAC -> CoreBluetooth UUID):
+Alias cache:
 
 ```bash
 razecli --json ble alias list
@@ -99,7 +156,7 @@ razecli --json ble alias clear --address F6:F2:0D:4E:D9:30
 razecli --json ble alias clear --all
 ```
 
-Raw BLE vendor transaction (manual key/payload testing):
+Manual vendor transactions:
 
 ```bash
 razecli --json ble raw --address F6:F2:0D:4E:D9:30 --payload "30 00 00 00 05 81 00 01" --timeout 10 --response-timeout 1.5
@@ -107,19 +164,14 @@ razecli --json ble raw --address F6:F2:0D:4E:D9:30 --payload "31 00 00 00 05 80 
 razecli --json ble raw --address F6:F2:0D:4E:D9:30 --payload "32 00 00 00 0B 84 01 00" --timeout 10 --response-timeout 1.5
 ```
 
-Focused poll-rate key probing:
+Poll-rate probes:
 
 ```bash
 razecli --json ble poll-probe --address F6:F2:0D:4E:D9:30 --attempts 2
-```
-
-Optional poll probe tuning:
-
-```bash
 razecli --json ble poll-probe --address F6:F2:0D:4E:D9:30 --attempts 3 --key 00850001 --key 0b850100
 ```
 
-Force BT poll-rate API path for unsupported models (RE only):
+Force poll-rate API for research:
 
 ```bash
 RAZECLI_BLE_POLL_CAP=1 \
@@ -127,7 +179,7 @@ RAZECLI_BLE_POLL_FORCE=1 \
 razecli --backend macos-ble poll-rate get --model deathadder-v2-pro
 ```
 
-Enable BT poll-rate by model slug (only after validation):
+Allowlist poll-rate by slug after validation:
 
 ```bash
 RAZECLI_BLE_POLL_CAP=1 \
@@ -135,21 +187,16 @@ RAZECLI_BLE_POLL_SUPPORTED_MODELS=basilisk-x-hyperspeed \
 razecli --backend macos-ble poll-rate get --model basilisk-x-hyperspeed
 ```
 
-RGB probing:
+RGB and buttons:
 
 ```bash
 razecli --json ble rgb-probe --address F6:F2:0D:4E:D9:30 --attempts 2
 razecli --json ble rgb-probe --address F6:F2:0D:4E:D9:30 --attempts 1 --mode-key 10830000
-```
-
-Button probing:
-
-```bash
 razecli --json ble button-probe --address F6:F2:0D:4E:D9:30 --attempts 2
 razecli --json ble button-probe --address F6:F2:0D:4E:D9:30 --key 08840104 --attempts 2
 ```
 
-Onboard profile bank capture:
+Banks:
 
 ```bash
 razecli --json ble bank-probe --address F6:F2:0D:4E:D9:30 --attempts 2
@@ -159,58 +206,36 @@ razecli --json ble bank-snapshot --address F6:F2:0D:4E:D9:30 --attempts 2 --labe
 razecli --json ble bank-compare --label-a bank-a --label-b bank-b
 ```
 
-## Capture Matrix (Fill During RE)
+## Capture checklist
 
-- Device: DeathAdder V2 Pro
-- Host: macOS version
-- Transport: USB / Dongle / BT
-- For each operation:
-  - `dpi get`
-  - `dpi set`
-  - `dpi-stages get`
-  - `dpi-stages set`
-  - `poll-rate get/set`
-  - `battery get`
-- Record fields:
-  - success/fail
-  - report-id
-  - tx-id
-  - status byte
-  - latency (ms)
-  - observed mouse-side behavior
+When validating a mouse, record the model slug, macOS version, and whether you used USB, dongle, or Bluetooth.
 
-## Troubleshooting Guide
+For each operation you care about (`dpi`, `dpi-stages`, `poll-rate`, `battery`, `rgb`, `button-mapping`), note success or failure, which keys ran, status bytes, latency, and what changed on the device.
 
-- `Device ... was not found` on macOS BLE:
-  - Resolve alias again and retry:
-    - `razecli --json ble alias resolve --address <MAC>`
-  - Run `ble scan` and retry while mouse is active in BT mode.
-  - Use `RAZECLI_BLE_BRUTEFORCE=1` only for debugging discovery edge cases.
+On DeathAdder V2 Pro over `rawhid` on `008E`, also note report id and transaction id when debugging HID-side attempts.
 
-- `poll-probe` returns `status: unsupported` with `status_code: 3` or `5`:
-  - Treat BT poll-rate as unavailable on that firmware/host.
-  - Use USB/2.4 for poll-rate.
-  - Keep model BT poll-rate config disabled.
+## Troubleshooting
 
-- `poll-probe` returns `status: transport-error`:
-  - This is connect/resolve instability, not protocol rejection.
-  - Retry with active device traffic and refresh alias mapping.
+- `Device ... was not found`: refresh aliases, rescan, confirm the mouse is in Bluetooth mode. Reserve `RAZECLI_BLE_BRUTEFORCE=1` for discovery debugging.
 
-- BT read/write commands are slow or flaky:
-  - Avoid parallel BLE operations.
-  - Keep response timeout modest (`1.0-2.5s`) and use repeated short attempts instead of one very long timeout.
+- `poll-probe` reports unsupported with status `3` or `5`: assume BT poll-rate is unavailable; use USB or dongle; keep the model’s BT poll flags off.
 
-## Reference Sources
+- `poll-probe` reports transport errors: treat as connectivity, not protocol rejection; retry after reconnect.
 
-- OpenSnek (macOS USB+BT, protocol docs and captures)
-- Linux Razer driver projects (USB packet format and model matrices)
-- OpenRGB (secondary reference for wireless Razer edge cases)
-- razer-macos (historical macOS implementation, mostly RGB)
+- Slow or flaky sessions: avoid overlapping BLE commands; prefer short timeouts and repeated attempts over one long wait.
 
-## Done Criteria
+## Done criteria for DeathAdder V2 Pro on BLE
 
-- `macos-ble` handles 20/20 repeated `dpi get` calls without timeout/failure.
-- `dpi-stages set` and `activate` are deterministic after reconnect.
-- No unintended reset to `400/1000` within the same bank after write/reconnect.
-- RGB read confidence is `verified` for mode/brightness/color on DA V2 Pro (no inferred fallbacks in normal flow).
-- Button mapping read confidence is `verified` for all exposed slots on DA V2 Pro, including DPI-cycle slot behavior.
+- Twenty consecutive `dpi get` calls succeed without timeouts.
+
+- `dpi-stages set` and activation behave the same after reconnect.
+
+- No surprise jumps to `400`/`1000` DPI inside the same bank after writes.
+
+- RGB reads reach `verified` confidence for mode, brightness, and color in normal use.
+
+- Button mapping reads reach `verified` for the slots you ship, including DPI cycle.
+
+## Done criteria for additional models
+
+Repeat the capture checklist, run `rgb-probe`, `button-probe`, and `bank-probe`, then only then clear `ble_endpoint_experimental` and widen `ble_supported_rgb_modes` when the captures justify it.

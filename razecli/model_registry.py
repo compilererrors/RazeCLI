@@ -9,6 +9,21 @@ import razecli.models
 from razecli.models.base import ModelSpec
 
 
+def _name_match_specificity(model: ModelSpec, device_name: str) -> int:
+    """Longest name/alias substring match length (for disambiguating overlapping families)."""
+    candidate = device_name.strip().lower()
+    if not candidate:
+        return 0
+    best = 0
+    phrases = (model.name.lower(),) + tuple(a.lower() for a in model.name_aliases)
+    for phrase in phrases:
+        if not phrase:
+            continue
+        if phrase in candidate:
+            best = max(best, len(phrase))
+    return best
+
+
 @dataclass
 class ModelRegistry:
     _models: Dict[str, ModelSpec]
@@ -54,10 +69,18 @@ class ModelRegistry:
         return None
 
     def find_by_name(self, device_name: str) -> Optional[ModelSpec]:
+        best: Optional[ModelSpec] = None
+        best_score = -1
         for model in self._models.values():
-            if model.matches_name(device_name):
-                return model
-        return None
+            if not model.matches_name(device_name):
+                continue
+            score = _name_match_specificity(model, device_name)
+            if score > best_score:
+                best_score = score
+                best = model
+            elif score == best_score and best is not None and model.slug > best.slug:
+                best = model
+        return best
 
     def iter(self) -> Iterable[ModelSpec]:
         return self._models.values()

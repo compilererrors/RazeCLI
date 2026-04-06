@@ -189,7 +189,20 @@ class _FakeVendorCall:
             return {"vendor_decode": {"payload_hex": ""}}
         if key_bytes == KEY_RGB_MODE_WRITE:
             payload = bytes(value_payload or b"")
-            if len(payload) >= 1:
+            if len(payload) >= 10:
+                row0 = int(payload[0])
+                eff = int(payload[3])
+                if row0 == 0x02:
+                    self.rgb_mode_selector = 0x02
+                    self.rgb_color = (int(payload[4]), int(payload[5]), int(payload[6]))
+                elif row0 == 0x01 and eff == 0x01:
+                    self.rgb_mode_selector = 0x01
+                    self.rgb_color = (int(payload[4]), int(payload[5]), int(payload[6]))
+                elif row0 == 0x01 and eff == 0x04:
+                    self.rgb_mode_selector = 0x04
+                elif row0 == 0x01 and eff == 0x00:
+                    self.rgb_mode_selector = 0x00
+            elif len(payload) >= 1:
                 self.rgb_mode_selector = int(payload[0])
             return {"vendor_decode": {"payload_hex": ""}}
         if len(key_bytes) == 4 and key_bytes[:3] == bytes.fromhex("080401"):
@@ -659,11 +672,10 @@ class MacOSBleBackendTest(unittest.TestCase):
         )
         state = self.backend.set_rgb(device, mode="spectrum", brightness=60, color=None)
         self.assertEqual(state["mode"], "spectrum")
-        self.assertEqual(self.fake_vendor.rgb_mode_selector, 0x08)
 
         mode_calls = [row for row in self.fake_vendor.calls if row["key_hex"] == KEY_RGB_MODE_WRITE.hex()]
         self.assertTrue(mode_calls)
-        self.assertEqual(mode_calls[-1]["value_payload"], bytes.fromhex("08000000"))
+        self.assertEqual(mode_calls[-1]["value_payload"], bytes.fromhex("01000004000000000000"))
 
     def test_rgb_breathing_mode_writes_mode_selector_and_color(self):
         device = self.backend.detect()[0]
@@ -753,7 +765,8 @@ class MacOSBleBackendTest(unittest.TestCase):
         device = self.backend.detect()[0]
         state = self.backend.set_rgb(device, mode="spectrum", brightness=60, color=None)
         self.assertEqual(state["mode"], "spectrum")
-        self.assertEqual(self.fake_vendor.rgb_mode_selector, 0x08)
+        mode_calls = [row for row in self.fake_vendor.calls if row["key_hex"] == KEY_RGB_MODE_WRITE.hex()]
+        self.assertEqual(mode_calls[-1]["value_payload"], bytes.fromhex("01000004000000000000"))
 
     def test_button_mapping_supports_scroll_and_keyboard_actions(self):
         device = self.backend.detect()[0]

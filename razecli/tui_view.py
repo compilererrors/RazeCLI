@@ -334,7 +334,9 @@ class TuiViewMixin:
             battery_text = "N/A (BT limited)"
 
         rgb_cache = getattr(self, "_rgb_cache", None)
-        rgb_state = rgb_cache.get(selected.identifier) if isinstance(rgb_cache, dict) else None
+        rgb_state = None
+        if isinstance(rgb_cache, dict):
+            rgb_state = rgb_cache.get(selected.identifier) or rgb_cache.get(str(selected.identifier))
         rgb_confidence_label: Optional[str] = None
         rgb_loading = False
         if "rgb" in selected.capabilities:
@@ -367,7 +369,9 @@ class TuiViewMixin:
             rgb_text = "-"
 
         button_cache = getattr(self, "_button_mapping_cache", None)
-        button_state = button_cache.get(selected.identifier) if isinstance(button_cache, dict) else None
+        button_state = None
+        if isinstance(button_cache, dict):
+            button_state = button_cache.get(selected.identifier) or button_cache.get(str(selected.identifier))
         button_confidence_label: Optional[str] = None
         button_loading = False
         if "button-mapping" in selected.capabilities:

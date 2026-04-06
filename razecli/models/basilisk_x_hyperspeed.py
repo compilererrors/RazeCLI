@@ -1,4 +1,4 @@
-"""Basilisk X HyperSpeed model definition."""
+"""Razer Basilisk X HyperSpeed model definition."""
 
 from razecli.models.base import ModelSpec, RawHidPidSpec
 

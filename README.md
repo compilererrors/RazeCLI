@@ -4,24 +4,26 @@ RazeCLI exists to make on-the-fly Razer mouse changes simple over USB, 2.4G dong
 
 The goal is a fast, lightweight, open source tool that avoids heavy vendor software installs.
 Current focus is practical settings: DPI, DPI stages, poll-rate, and battery where supported.
-RGB and button mapping now run hardware-first on supported backends (currently experimental on `macos-ble` for DA V2 Pro), with confidence-aware read state and local fallback persistence when unsupported.
+RGB and button mapping run hardware-first where the backend can talk to the device. On `macos-ble` that path is still experimental for models that expose a Bluetooth control endpoint; DeathAdder V2 Pro is the furthest along. Read paths report confidence when hardware state is partial, and local fallback storage covers unsupported cases.
 
 ![RazeCLI TUI screenshot](assets/tuiScreenShot.png)
 ![RazeCLI CLI screenshot](assets/cliScreenShot.png)
 ![RazeCLI RGB menu in TUI](assets/rgbEditor.png)
 ![RazeCLI Button-mapping menu in TUI](assets/setButtonMapping.png)
 
-Supported models:
-- `deathadder-v2-pro` (`1532:007C`, `1532:007D`, `1532:008E`)
-- `deathadder-v2` (`1532:0084`)
-- `deathadder-v2-mini` (`1532:008C`)
-- `basilisk-x-hyperspeed` (`1532:0083`)
+## Supported models
+
+- List everything the tool knows about: `razecli models` or `razecli --json models` (slugs, `1532:…` USB IDs, Bluetooth PIDs, flags).
+- The registry loads `razecli/models/*.py` at runtime. Packaged builds also rely on `BUILTIN_MODEL_MODULES` in `razecli/models/__init__.py`, so new files should be added there too.
+- DeathAdder V2 Pro (`deathadder-v2-pro`) is the main validation target: `rawhid` on `007C` / `007D` and `macos-ble` on `008E`. That combination is where DPI stages, battery, RGB, and button mapping on BLE have been exercised the most.
+- Many other mice are registered from OpenRazer’s USB PID list (`driver/razermouse_driver.h`) and aligned where possible with community captures (for example OpenSnek). Expect to tune keys or flags per device until you confirm behavior on hardware.
+- `macos-ble` only attaches to Bluetooth product IDs listed in `ble_endpoint_product_ids` for each model (aggregated across the registry). Examples that ship today include `008E`, `0083`, `00AC`, `00BA`, and `0095`. Use `ble_endpoint_experimental` in the model module until a given mouse is verified end to end.
 
 ## Current Status
 
 - USB mode (`007C`) and 2.4G dongle mode (`007D`) are the most stable paths.
 - Poll-rate over USB/dongle is available via `rawhid` on supported models.
-- Bluetooth endpoint (`008E`) is handled by a dedicated macOS GATT backend: `macos-ble`.
+- Bluetooth endpoints (PIDs declared per model, e.g. `008E` for DeathAdder V2 Pro) are handled by the macOS GATT backend: `macos-ble`.
 - Bluetooth support is still experimental on macOS and connect/discovery can fail on some hosts.
 - Poll-rate over Bluetooth is model-gated in `macos-ble`.
 - Model config is the primary switch (`ble_poll_rate_supported` / `ble_supported_poll_rates` in `razecli/models/*.py`).
@@ -49,7 +51,7 @@ Status legend:
 - RGB get/set: `partial`
 - Button mapping get/set: `partial`
 
-### `macos-ble` (`008E`, DA V2 Pro focus)
+### `macos-ble` (Bluetooth; registry-driven PID list, DA V2 Pro most tested)
 - Detect/list devices: `verified`
 - DPI get/set: `verified`
 - DPI levels (`dpi-stages`): `partial` (bank/profile dependent)
@@ -126,14 +128,14 @@ Status legend:
 1. Finalize BLE RGB read mapping (mode + brightness + color) so `rgb get` can be treated as fully verified on DA V2 Pro.
 2. Add DA V2 Pro RGB/button parity paths in `rawhid` where transport permits.
 3. Expand bank/profile-safe DPI workflows and fixtures for reconnect/profile-switch scenarios.
-4. Extend model coverage after DA V2 Pro paths are validated with repeatable fixtures and hardware runs.
+4. Extend model coverage: register OpenRazer-backed PIDs in `razecli/models/`, validate BLE per slug using `docs/ble_reverse_engineering_plan.md`, add fixtures and hardware runs.
 
 ## Architecture
 
 - `razecli/models/`: one file per model (`MODEL = ModelSpec(...)`)
 - `razecli/model_registry.py`: dynamic model loader
 - `razecli/backends/rawhid_backend.py`: direct HID packet control via `hidapi` (USB + experimental BT)
-- `razecli/backends/macos_ble_backend.py`: dedicated experimental BT backend for `008E` on macOS (vendor GATT)
+- `razecli/backends/macos_ble_backend.py`: experimental BT backend on macOS (vendor GATT); targets every PID listed in `ModelSpec.ble_endpoint_product_ids` across registered models (not only `008E`)
 - `razecli/backends/hidapi_backend.py`: detection fallback
 - `razecli/backends/macos_profiler_backend.py`: macOS detection via `system_profiler` (USB + Bluetooth)
 
@@ -149,7 +151,7 @@ Status legend:
 Option A (`rawhid` backend):
 - `hidapi` installed.
 - DeathAdder V2 Pro control works in direct HID mode (`007C`/`007D`).
-- Bluetooth PID `008E` in `rawhid` is experimental and host/driver dependent.
+- Bluetooth PIDs in `rawhid` (when the OS exposes them as HID) are experimental and host/driver dependent; on macOS BT prefer `--backend macos-ble`.
 
 Option B (BLE reverse engineering):
 - `bleak` installed for GATT scan/probe.
@@ -423,7 +425,7 @@ razecli --backend hidapi devices
 razecli --backend macos-profiler tui --all-models
 ```
 
-Bluetooth in `rawhid` (`008E`) is experimental HID mode. On macOS BT, prefer `--backend macos-ble`.
+Bluetooth over `rawhid` (when the OS enumerates the mouse as an HID node, e.g. some `1532:008E` setups) is experimental. On macOS BT, prefer `--backend macos-ble`.
 
 Debug rawhid BT probe (path/rid/tx attempts on stderr):
 
@@ -495,7 +497,7 @@ razecli --json ble bank-compare --label-a bank-a --label-b bank-b
 
 ## Why `--backend macos-ble` May Return No Devices
 
-`macos-ble` is BT-only and only targets the Bluetooth endpoint (`1532:008E`).
+`macos-ble` only talks to Bluetooth. A device shows up when its Bluetooth `product_id` is listed in `ble_endpoint_product_ids` on at least one model (the registry merges all of those into one set). Today that includes IDs such as `008E`, `0083`, `00AC`, `00BA`, and `0095`. For ad-hoc debugging you can still set `RAZECLI_BLE_PRODUCT_IDS`.
 
 If `razecli --backend macos-ble --json devices --model deathadder-v2-pro` returns `[]`:
 - Make sure the mouse is switched to Bluetooth mode (not USB/dongle mode).
@@ -505,13 +507,13 @@ If `razecli --backend macos-ble --json devices --model deathadder-v2-pro` return
 
 ## Adding BT Support for More Razer Models
 
-`macos-ble` can be expanded to additional product IDs that expose the same vendor service.
+`macos-ble` works for any model entry that sets `ble_endpoint_product_ids`. You still need the same vendor GATT service and characteristic UUIDs as in existing captures; OpenSnek documents that layout in [BLE_PROTOCOL.md](https://github.com/gh123man/opensnek/blob/main/docs/protocol/BLE_PROTOCOL.md).
 
-- Default BT PID set includes `0x008E` and `0x0083`.
-- Override/extend at runtime:
+- The default PID allowlist comes from `ModelRegistry.ble_endpoint_product_ids()`, not from a hardcoded list in the backend.
+- Override or extend at runtime:
 
 ```bash
-RAZECLI_BLE_PRODUCT_IDS=0x008E,0x0083,0x00A5 razecli --backend macos-ble --json devices
+RAZECLI_BLE_PRODUCT_IDS=0x008E,0x0083,0x00AC razecli --backend macos-ble --json devices
 ```
 
 Recommended workflow when adding a new BT model:
@@ -554,9 +556,10 @@ Install with `python -m pip install pynput` and grant macOS Accessibility/Input 
 
 1. Create a file in `razecli/models/`, for example `viper_v2_pro.py`.
 2. Export `MODEL = ModelSpec(...)` with USB IDs and constraints.
-3. Done: the registry auto-loads the model.
+3. Add the module name to `BUILTIN_MODEL_MODULES` in `razecli/models/__init__.py` (needed for some frozen/packaged builds where package enumeration is incomplete).
+4. Done: the registry auto-loads the model on normal installs.
 
-Example:
+Example (matches the in-tree `viper-v2-pro` module; omit BLE fields until the Bluetooth PID is confirmed):
 
 ```python
 from razecli.models.base import ModelSpec, RawHidPidSpec
@@ -571,21 +574,20 @@ MODEL = ModelSpec(
     ble_poll_rate_supported=False,
     ble_supported_poll_rates=(),
     ble_supported_rgb_modes=("off", "static"),
-    ble_endpoint_product_ids=(0x00A6,),
-    ble_endpoint_experimental=True,
-    ble_multi_profile_table_limited=False,
-    onboard_profile_bank_switch=False,
-    rawhid_mirror_product_ids=(0x00A5,),
+    rawhid_mirror_product_ids=(0x00A5, 0x00A6),
     rawhid_pid_specs=(
         RawHidPidSpec(
             product_id=0x00A5,
             capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
-            experimental=True,
+            name_hint="Razer Viper V2 Pro",
+        ),
+        RawHidPidSpec(
+            product_id=0x00A6,
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            name_hint="Razer Viper V2 Pro",
         ),
     ),
     rawhid_transport_priority=(0x00A5, 0x00A6),
-    cli_default_target=False,
-    ble_button_decode_layouts=("razer-v1",),
 )
 ```
 
@@ -596,6 +598,12 @@ CLI/TUI default target selection and rawhid transport preference should also com
 (`cli_default_target`, `rawhid_transport_priority`) so adding a new model does not require branch logic edits.
 Rawhid support profiles should be declared in `rawhid_pid_specs` and BLE button decoding behavior in
 `ble_button_decode_layouts` to avoid per-model hardcoded branches in backends.
+
+## Acknowledgments
+
+- [OpenSnek](https://github.com/gh123man/opensnek) (Apache 2.0) is a solid project—great repo and a polished macOS app for configuring supported Razer mice. Their BLE and USB protocol notes matched what we saw on hardware, so we used them alongside our own captures when figuring out vendor GATT keys and framing.
+
+- [OpenRazer](https://github.com/openrazer/openrazer): handy for USB product IDs and the 90-byte report layout.
 
 ## Additional Notes
 
@@ -609,11 +617,11 @@ Rawhid support profiles should be declared in `rawhid_pid_specs` and BLE button 
 - `rawhid` collapses transport variants by default using model-declared `rawhid_transport_priority`. Use `--all-transports` to see each endpoint.
 - `tui` defaults to the model marked with `cli_default_target=True`. Use `razecli tui --all-models` to view everything detected.
 - `macos-profiler` is detect-only and cannot write DPI, DPI stages, poll-rate, or battery.
-- `macos-ble` targets BT reverse engineering for `008E` and reuses Razer packet framing over vendor GATT.
+- `macos-ble` targets Bluetooth endpoints declared on each model and reuses the same vendor GATT framing and key catalog as documented in OpenSnek (see `docs/ble_reverse_engineering_plan.md`).
 - DeathAdder V2 Pro supports up to 5 DPI stages per active onboard profile bank.
 - The bottom DPI button/LED can switch onboard banks; stage count/values may differ between banks.
 - `007C` (USB) and `007D` (dongle) transport mirroring is disabled by default.
 - Enable mirror only when needed: `RAZECLI_TRANSPORT_MIRROR=1`.
-- Bluetooth endpoint `008E` is excluded from mirror mode.
+- Bluetooth / `macos-ble` transports are excluded from `rawhid` transport mirroring.
 - Optional USB/BT autosync can be enabled with `RAZECLI_AUTOSYNC=1`.
 - See [BLE reverse engineering plan](docs/ble_reverse_engineering_plan.md) for capture workflow.

@@ -26,12 +26,12 @@ MODEL = ModelSpec(
     rawhid_pid_specs=(
         RawHidPidSpec(
             product_id=0x00B9,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Basilisk V3 X HyperSpeed",
         ),
         RawHidPidSpec(
             product_id=0x00BA,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Basilisk V3 X HyperSpeed",
             tx_candidates=(0x3F, 0x1F, 0xFF),
             report_id_candidates=(0x00, 0x02),

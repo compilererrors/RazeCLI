@@ -23,17 +23,17 @@ MODEL = ModelSpec(
     rawhid_pid_specs=(
         RawHidPidSpec(
             product_id=0x007C,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer DeathAdder V2 Pro",
         ),
         RawHidPidSpec(
             product_id=0x007D,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer DeathAdder V2 Pro",
         ),
         RawHidPidSpec(
             product_id=0x008E,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer DeathAdder V2 Pro",
             tx_candidates=(0x3F, 0x1F, 0xFF),
             report_id_candidates=(0x00, 0x02),

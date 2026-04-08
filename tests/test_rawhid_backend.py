@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -5,10 +6,12 @@ from razecli.backends.rawhid_backend import (
     PID_PROFILES,
     RazerCommand,
     RawHidBackend,
+    _LED_BACKLIGHT,
     _build_report,
     _extract_response_fields,
     _normalize_feature_response,
 )
+from razecli.errors import CapabilityUnsupportedError
 
 
 class RawHidReportTest(unittest.TestCase):
@@ -51,6 +54,160 @@ class RawHidReportTest(unittest.TestCase):
         self.assertEqual(fields["command_class"], 0x00)
         self.assertEqual(fields["command_id"], 0x85)
         self.assertEqual(fields["arguments"][0], 0x01)
+
+    def test_with_varstore_rewrites_first_argument(self):
+        backend = RawHidBackend()
+        command = RazerCommand(command_class=0x03, command_id=0x81, data_size=0x05, arguments=(0x01, 0x05))
+        rewritten = backend._with_varstore(command, 0x00)
+        self.assertEqual(rewritten.command_class, 0x03)
+        self.assertEqual(rewritten.command_id, 0x81)
+        self.assertEqual(rewritten.arguments[0], 0x00)
+        self.assertEqual(rewritten.arguments[1], 0x05)
+
+    def test_rgb_varstores_from_env(self):
+        backend = RawHidBackend()
+        previous = os.environ.get("RAZECLI_RAWHID_RGB_VARSTORES")
+        try:
+            os.environ["RAZECLI_RAWHID_RGB_VARSTORES"] = "0x01,0x00,0x01"
+            self.assertEqual(backend._rgb_varstores(), (0x01, 0x00))
+        finally:
+            if previous is None:
+                os.environ.pop("RAZECLI_RAWHID_RGB_VARSTORES", None)
+            else:
+                os.environ["RAZECLI_RAWHID_RGB_VARSTORES"] = previous
+
+    def test_chroma_extended_matrix_static_command_layout(self):
+        backend = RawHidBackend()
+        cmd = backend._chroma_extended_matrix_static_command(_LED_BACKLIGHT, 0x00, 0xFF, 0x00)
+        self.assertEqual(cmd.command_class, 0x0F)
+        self.assertEqual(cmd.command_id, 0x02)
+        self.assertEqual(cmd.data_size, 0x09)
+        self.assertEqual(cmd.arguments[1], _LED_BACKLIGHT)
+        self.assertEqual(cmd.arguments[6], 0x00)
+        self.assertEqual(cmd.arguments[7], 0xFF)
+        self.assertEqual(cmd.arguments[8], 0x00)
+
+    def test_chroma_mouse_extended_static_command_layout(self):
+        backend = RawHidBackend()
+        cmd = backend._chroma_mouse_extended_static_command(_LED_BACKLIGHT, 0x00, 0xFF, 0x00)
+        self.assertEqual(cmd.command_class, 0x03)
+        self.assertEqual(cmd.command_id, 0x0D)
+        self.assertEqual(cmd.data_size, 0x09)
+        self.assertEqual(cmd.arguments[1], _LED_BACKLIGHT)
+        self.assertEqual(cmd.arguments[6], 0x00)
+        self.assertEqual(cmd.arguments[7], 0xFF)
+        self.assertEqual(cmd.arguments[8], 0x00)
+
+    def test_chroma_mouse_standard_static_command_layout(self):
+        backend = RawHidBackend()
+        cmd = backend._chroma_mouse_standard_static_command(_LED_BACKLIGHT, 0x00, 0xFF, 0x00)
+        self.assertEqual(cmd.command_class, 0x03)
+        self.assertEqual(cmd.command_id, 0x0A)
+        self.assertEqual(cmd.data_size, 0x09)
+        self.assertEqual(cmd.arguments[1], _LED_BACKLIGHT)
+        self.assertEqual(cmd.arguments[6], 0x00)
+        self.assertEqual(cmd.arguments[7], 0xFF)
+        self.assertEqual(cmd.arguments[8], 0x00)
+
+    def test_set_rgb_falls_back_to_mouse_extended_protocol(self):
+        backend = RawHidBackend()
+        calls = []
+
+        def _fake_transceive(_device, command):
+            calls.append((int(command.command_class), int(command.command_id)))
+            if int(command.command_class) == 0x0F:
+                raise RuntimeError("extended-matrix unsupported")
+            return {"arguments": bytes(80)}
+
+        backend._transceive = _fake_transceive  # type: ignore[method-assign]
+        device = SimpleNamespace(
+            capabilities={"rgb"},
+            product_id=0x0084,
+            usb_id=lambda: "1532:0084",
+        )
+
+        result = backend.set_rgb(device=device, mode="static", brightness=100, color="00ff00")  # type: ignore[arg-type]
+        self.assertEqual(result["hardware_apply"], "applied")
+        self.assertIn("mouse-extended", result["write_protocols"])
+        self.assertTrue(any(cls == 0x03 and cid == 0x0D for cls, cid in calls))
+
+    def test_set_rgb_static_forces_led_state_and_full_brightness(self):
+        backend = RawHidBackend()
+        calls = []
+
+        def _fake_transceive(_device, command):
+            calls.append(
+                (
+                    int(command.command_class),
+                    int(command.command_id),
+                    tuple(int(value) for value in command.arguments),
+                )
+            )
+            return {"arguments": bytes(80)}
+
+        def _fake_get_rgb(_device):
+            return {
+                "mode": "static",
+                "brightness": 100,
+                "color": "00ff00",
+                "read_confidence": {"overall": "verified"},
+            }
+
+        backend._transceive = _fake_transceive  # type: ignore[method-assign]
+        backend.get_rgb = _fake_get_rgb  # type: ignore[method-assign]
+        device = SimpleNamespace(
+            capabilities={"rgb"},
+            product_id=0x0084,
+            usb_id=lambda: "1532:0084",
+        )
+
+        result = backend.set_rgb(device=device, mode="static", brightness=100, color="00ff00")  # type: ignore[arg-type]
+        self.assertEqual(result["hardware_apply"], "applied")
+        self.assertTrue(any(cls == 0x03 and cid == 0x00 and len(args) >= 3 and args[2] == 0x01 for cls, cid, args in calls))
+        self.assertTrue(any(cls == 0x03 and cid == 0x03 and len(args) >= 3 and args[2] == 0xFF for cls, cid, args in calls))
+
+    def test_get_rgb_reports_inferred_when_reads_fail(self):
+        backend = RawHidBackend()
+
+        def _fake_transceive(_device, _command):
+            raise RuntimeError("read not available")
+
+        backend._transceive = _fake_transceive  # type: ignore[method-assign]
+        device = SimpleNamespace(
+            capabilities={"rgb"},
+            product_id=0x0084,
+            usb_id=lambda: "1532:0084",
+        )
+
+        payload = backend.get_rgb(device=device)  # type: ignore[arg-type]
+        confidence = payload.get("read_confidence", {})
+        self.assertEqual(confidence.get("overall"), "inferred")
+        self.assertEqual(payload.get("color"), "00ff00")
+
+    def test_set_rgb_raises_when_verification_is_inferred(self):
+        backend = RawHidBackend()
+
+        def _fake_transceive(_device, _command):
+            return {"arguments": bytes(80)}
+
+        def _fake_get_rgb(_device):
+            return {
+                "mode": "static",
+                "brightness": 100,
+                "color": "00ff00",
+                "read_confidence": {"overall": "inferred"},
+            }
+
+        backend._transceive = _fake_transceive  # type: ignore[method-assign]
+        backend.get_rgb = _fake_get_rgb  # type: ignore[method-assign]
+        device = SimpleNamespace(
+            capabilities={"rgb"},
+            product_id=0x0084,
+            usb_id=lambda: "1532:0084",
+        )
+
+        with self.assertRaises(CapabilityUnsupportedError):
+            backend.set_rgb(device=device, mode="static", brightness=100, color="00ff00")  # type: ignore[arg-type]
 
 
 class RawHidMappingTest(unittest.TestCase):

@@ -370,6 +370,17 @@ class TuiController(TuiViewMixin, TuiActionsMixin):
             def _on_state_success(_result: Any) -> None:
                 self._state_refresh_retry_attempts = 0
                 self._state_refresh_retry_due_at = 0.0
+                status_now = str(self.status).strip()
+                refresh_label = "Refreshing device state"
+                if not status_now.lower().startswith(refresh_label.lower()):
+                    return
+                selected = self._selected()
+                if selected is not None:
+                    self.status = f"State updated | selected: {selected.identifier}"
+                elif self.devices:
+                    self.status = f"State updated | found {len(self.devices)} devices"
+                else:
+                    self.status = "State updated"
 
             def _on_state_error(exc: Exception) -> None:
                 message = str(exc)

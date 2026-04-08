@@ -336,6 +336,8 @@ razecli rgb set --mode breathing --brightness 45 --color ff5500
 razecli rgb set --mode breathing-single --brightness 45 --color ff5500
 razecli rgb set --mode breathing-random --brightness 45 --color ff5500
 razecli rgb set --mode spectrum --brightness 60
+# Re-apply saved RGB when device reconnects/wakes
+razecli rgb reapply --device rawhid:1532:007A --interval 3
 ```
 
 Button mapping (hardware-first when backend supports it, local fallback otherwise):

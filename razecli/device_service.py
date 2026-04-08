@@ -143,6 +143,57 @@ class DeviceService:
             collapsed.append(device)
         return collapsed
 
+    @classmethod
+    def _hidapi_interface_sort_key(cls, device: DetectedDevice) -> Tuple[int, str]:
+        """Prefer lower HID interface number, then stable identifier order."""
+        handle = device.backend_handle if isinstance(device.backend_handle, dict) else {}
+        iface = handle.get("interface_number")
+        try:
+            iface_i = int(iface) if iface is not None else 999
+        except (TypeError, ValueError):
+            iface_i = 999
+        return (iface_i, device.identifier)
+
+    @classmethod
+    def _collapse_hidapi_interface_duplicates(cls, devices: List[DetectedDevice]) -> List[DetectedDevice]:
+        """Keep one hidapi row per (VID, PID, serial) when paths differ only by HID interface.
+
+        On macOS, ``hidapi`` often lists multiple collections for one USB device (distinct
+        ``path`` / ``DevSrvsID`` values). Detect-only entries would otherwise clutter the list.
+        """
+        groups: Dict[Tuple[int, int, str], List[DetectedDevice]] = {}
+        for device in devices:
+            if device.backend != "hidapi" or device.capabilities:
+                continue
+            serial = cls._normalized_serial(device.serial)
+            serial_key = serial if serial is not None else ""
+            key = (device.vendor_id, device.product_id, serial_key)
+            groups.setdefault(key, []).append(device)
+
+        winners: Dict[Tuple[int, int, str], DetectedDevice] = {}
+        for key, group in groups.items():
+            if len(group) <= 1:
+                winners[key] = group[0]
+            else:
+                winners[key] = min(group, key=cls._hidapi_interface_sort_key)
+
+        result: List[DetectedDevice] = []
+        for device in devices:
+            if device.backend != "hidapi" or device.capabilities:
+                result.append(device)
+                continue
+            serial = cls._normalized_serial(device.serial)
+            serial_key = serial if serial is not None else ""
+            key = (device.vendor_id, device.product_id, serial_key)
+            group = groups[key]
+            if len(group) <= 1:
+                result.append(device)
+                continue
+            if device is not winners[key]:
+                continue
+            result.append(device)
+        return result
+
     @staticmethod
     def _collapse_bt_backend_duplicates(devices: List[DetectedDevice]) -> List[DetectedDevice]:
         """
@@ -215,6 +266,7 @@ class DeviceService:
                 merged.append(device)
 
         merged = self._collapse_detect_only_duplicates(merged)
+        merged = self._collapse_hidapi_interface_duplicates(merged)
 
         if collapse_transports:
             merged = self._collapse_rawhid_transports(merged)

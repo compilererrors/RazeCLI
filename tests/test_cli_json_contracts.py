@@ -11,7 +11,7 @@ from razecli.cli_battery import handle_battery
 from razecli.cli_button_mapping import handle_button_mapping
 from razecli.cli_devices import handle_devices
 from razecli.cli_rgb import handle_rgb
-from razecli.errors import RazeCliError
+from razecli.errors import CapabilityUnsupportedError, RazeCliError
 from razecli.feature_scaffolds import set_rgb_scaffold
 from razecli.types import DetectedDevice
 
@@ -88,6 +88,39 @@ class _FakeHardwareBackend(_FakeBackend):
         return {
             "buttons": list(self._mapping.keys()),
             "actions": ["mouse:left", "mouse:right", "mouse:middle", "mouse:back", "mouse:forward", "dpi:cycle"],
+        }
+
+
+class _FakeUnsupportedRgbBackend(_FakeBackend):
+    def set_rgb(self, _device, *, mode, brightness=None, color=None):
+        _ = (mode, brightness, color)
+        raise CapabilityUnsupportedError("Onboard RGB write is unsupported for test device")
+
+
+class _FakeNotSupportedRgbBackend(_FakeBackend):
+    def set_rgb(self, _device, *, mode, brightness=None, color=None):
+        _ = (mode, brightness, color)
+        raise CapabilityUnsupportedError("Capability 'rgb' is not supported for test device")
+
+
+class _FakeReapplyRgbBackend(_FakeBackend):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def set_rgb(self, _device, *, mode, brightness=None, color=None):
+        self.calls.append(
+            {
+                "mode": str(mode),
+                "brightness": None if brightness is None else int(brightness),
+                "color": None if color is None else str(color).lower().lstrip("#"),
+            }
+        )
+        return {
+            "mode": str(mode),
+            "brightness": 0 if brightness is None else int(brightness),
+            "color": "000000" if color is None else str(color).lower().lstrip("#"),
+            "modes_supported": ["off", "static", "breathing", "spectrum"],
         }
 
 
@@ -843,6 +876,122 @@ class CliJsonContractTest(unittest.TestCase):
             self.assertEqual(payload["rgb"]["mode"], "static")
             self.assertEqual(payload["rgb"]["brightness"], 55)
             self.assertEqual(payload["rgb"]["color"], "00ff88")
+
+    def test_rgb_set_reports_unsupported_status_when_backend_rejects(self):
+        device = DetectedDevice(
+            identifier="rawhid:1532:007A",
+            name="Razer Viper Ultimate",
+            vendor_id=0x1532,
+            product_id=0x007A,
+            backend="rawhid",
+            model_id="viper-ultimate",
+            capabilities={"rgb"},
+        )
+        service = _FakeService(device, backend=_FakeUnsupportedRgbBackend())
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = str(Path(tmp_dir) / "feature_store.json")
+            args = argparse.Namespace(
+                rgb_command="set",
+                mode="static",
+                brightness=100,
+                color="#ffffff",
+                store_file=store,
+                model=None,
+                device=None,
+                json=True,
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = handle_rgb(service, args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "unsupported")
+            self.assertEqual(payload["rgb"]["hardware_apply"], "fallback-local")
+            self.assertIn("unsupported", str(payload["rgb"].get("hardware_error", "")).lower())
+
+    def test_rgb_set_reports_unsupported_status_when_backend_says_not_supported(self):
+        device = DetectedDevice(
+            identifier="rawhid:1532:007B",
+            name="Razer Viper Ultimate Dongle",
+            vendor_id=0x1532,
+            product_id=0x007B,
+            backend="rawhid",
+            model_id="viper-ultimate",
+            capabilities={"rgb"},
+        )
+        service = _FakeService(device, backend=_FakeNotSupportedRgbBackend())
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = str(Path(tmp_dir) / "feature_store.json")
+            args = argparse.Namespace(
+                rgb_command="set",
+                mode="static",
+                brightness=100,
+                color="#ffffff",
+                store_file=store,
+                model=None,
+                device=None,
+                json=True,
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = handle_rgb(service, args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "unsupported")
+            self.assertEqual(payload["rgb"]["hardware_apply"], "fallback-local")
+            self.assertIn("not supported", str(payload["rgb"].get("hardware_error", "")).lower())
+
+    def test_rgb_reapply_json_contract(self):
+        device = DetectedDevice(
+            identifier="rawhid:1532:007C",
+            name="Razer DeathAdder V2 Pro",
+            vendor_id=0x1532,
+            product_id=0x007C,
+            backend="rawhid",
+            model_id="deathadder-v2-pro",
+            capabilities={"rgb"},
+        )
+        backend = _FakeReapplyRgbBackend()
+        service = _FakeService(device, backend=backend)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = str(Path(tmp_dir) / "feature_store.json")
+            set_rgb_scaffold(
+                "deathadder-v2-pro",
+                mode="static",
+                brightness=35,
+                color="#abcdef",
+                path=store,
+            )
+            args = argparse.Namespace(
+                rgb_command="reapply",
+                interval=0.01,
+                duration=None,
+                max_cycles=1,
+                stop_on_unsupported=False,
+                store_file=store,
+                model=None,
+                device=None,
+                address=None,
+                json=True,
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = handle_rgb(service, args)
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["command"], "rgb-reapply")
+            self.assertEqual(payload["cycles"], 1)
+            self.assertEqual(payload["applied"], 1)
+            self.assertEqual(payload["unsupported"], 0)
+            self.assertEqual(payload["errors"], 0)
+            self.assertEqual(payload["last_device_id"], "rawhid:1532:007C")
+            self.assertEqual(backend.calls[0]["mode"], "static")
+            self.assertEqual(backend.calls[0]["brightness"], 35)
+            self.assertEqual(backend.calls[0]["color"], "abcdef")
 
     def test_button_mapping_set_json_contract(self):
         device = DetectedDevice(

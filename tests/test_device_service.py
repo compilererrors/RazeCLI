@@ -75,6 +75,63 @@ class DeviceServiceTest(unittest.TestCase):
         self.assertEqual(len(collapsed), 1)
         self.assertEqual(collapsed[0].backend, "macos-ble")
 
+    def test_collapse_hidapi_interface_duplicates_merges_same_vid_pid_serial(self):
+        dock_a = DetectedDevice(
+            identifier="DevSrvsID:4294975398",
+            name="Razer Mouse Dock",
+            vendor_id=0x1532,
+            product_id=0x007E,
+            backend="hidapi",
+            serial=None,
+            capabilities=set(),
+            backend_handle={"interface_number": 2},
+        )
+        dock_b = DetectedDevice(
+            identifier="DevSrvsID:4294975399",
+            name="Razer Mouse Dock",
+            vendor_id=0x1532,
+            product_id=0x007E,
+            backend="hidapi",
+            serial=None,
+            capabilities=set(),
+            backend_handle={"interface_number": 0},
+        )
+        dock_c = DetectedDevice(
+            identifier="DevSrvsID:4294975396",
+            name="Razer Mouse Dock",
+            vendor_id=0x1532,
+            product_id=0x007E,
+            backend="hidapi",
+            serial=None,
+            capabilities=set(),
+            backend_handle={"interface_number": 1},
+        )
+        collapsed = DeviceService._collapse_hidapi_interface_duplicates([dock_a, dock_b, dock_c])
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(collapsed[0].identifier, "DevSrvsID:4294975399")
+
+    def test_collapse_hidapi_interface_duplicates_keeps_distinct_serials(self):
+        a = DetectedDevice(
+            identifier="path-a",
+            name="Razer Mouse Dock",
+            vendor_id=0x1532,
+            product_id=0x007E,
+            backend="hidapi",
+            serial="S1",
+            capabilities=set(),
+        )
+        b = DetectedDevice(
+            identifier="path-b",
+            name="Razer Mouse Dock",
+            vendor_id=0x1532,
+            product_id=0x007E,
+            backend="hidapi",
+            serial="S2",
+            capabilities=set(),
+        )
+        collapsed = DeviceService._collapse_hidapi_interface_duplicates([a, b])
+        self.assertEqual(len(collapsed), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

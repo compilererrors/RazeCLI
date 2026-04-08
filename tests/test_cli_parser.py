@@ -2,7 +2,7 @@ import unittest
 import subprocess
 import sys
 
-from razecli.cli import DEFAULT_MODEL, build_parser
+from razecli.cli import build_parser
 
 
 class CliParserTest(unittest.TestCase):
@@ -11,9 +11,16 @@ class CliParserTest(unittest.TestCase):
         args = parser.parse_args(["tui"])
 
         self.assertEqual(args.command, "tui")
-        self.assertEqual(args.model, DEFAULT_MODEL)
+        self.assertIsNone(args.model)
         self.assertFalse(args.all_models)
         self.assertIsNone(args.device)
+
+    def test_dpi_get_default_model_unset(self):
+        parser = build_parser()
+        args = parser.parse_args(["dpi", "get"])
+        self.assertEqual(args.command, "dpi")
+        self.assertEqual(args.dpi_command, "get")
+        self.assertIsNone(args.model)
 
     def test_tui_all_models_flag(self):
         parser = build_parser()

@@ -434,6 +434,28 @@ class CliParserTest(unittest.TestCase):
         self.assertTrue(args.all_models)
         self.assertTrue(args.all_transports)
 
+    def test_rgb_reapply_parse(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "rgb",
+                "reapply",
+                "--interval",
+                "2.5",
+                "--duration",
+                "60",
+                "--max-cycles",
+                "10",
+                "--stop-on-unsupported",
+            ]
+        )
+        self.assertEqual(args.command, "rgb")
+        self.assertEqual(args.rgb_command, "reapply")
+        self.assertEqual(args.interval, 2.5)
+        self.assertEqual(args.duration, 60.0)
+        self.assertEqual(args.max_cycles, 10)
+        self.assertTrue(args.stop_on_unsupported)
+
     def test_button_mapping_set_parse(self):
         parser = build_parser()
         args = parser.parse_args(

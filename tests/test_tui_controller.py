@@ -150,6 +150,49 @@ class TuiControllerTest(unittest.TestCase):
             self._wait_until(lambda: not controller._is_feature_prefetch_inflight("dev-1", "button-mapping"))
         )
 
+    def test_state_refresh_success_sets_completed_status_when_refresh_message_is_stale(self):
+        backend = _FakeBackend()
+        controller = TuiController(service=_FakeService(backend))
+        controller.devices = [self._device()]
+        controller.selected_index = 0
+
+        def _fake_refresh_state(*, force: bool = False) -> None:
+            _ = force
+            return None
+
+        controller._refresh_state = _fake_refresh_state  # type: ignore[assignment]
+        controller.status = "Refreshing device state..."
+        controller._queue_state_refresh(force=True)
+
+        self.assertTrue(controller._run_pending_io())
+        drained = self._wait_until(lambda: controller._drain_background_job_results(), timeout_s=1.0)
+
+        self.assertTrue(drained)
+        self.assertEqual(controller.status, "State updated | selected: dev-1")
+
+    def test_state_refresh_success_does_not_override_new_status(self):
+        backend = _FakeBackend()
+        controller = TuiController(service=_FakeService(backend))
+        controller.devices = [self._device()]
+        controller.selected_index = 0
+
+        def _fake_refresh_state(*, force: bool = False) -> None:
+            _ = force
+            controller.status = "Bluetooth mode (1532:008E) is experimental; could not read: poll-rate"
+
+        controller._refresh_state = _fake_refresh_state  # type: ignore[assignment]
+        controller.status = "Refreshing device state..."
+        controller._queue_state_refresh(force=True)
+
+        self.assertTrue(controller._run_pending_io())
+        drained = self._wait_until(lambda: controller._drain_background_job_results(), timeout_s=1.0)
+
+        self.assertTrue(drained)
+        self.assertEqual(
+            controller.status,
+            "Bluetooth mode (1532:008E) is experimental; could not read: poll-rate",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

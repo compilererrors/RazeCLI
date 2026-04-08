@@ -591,9 +591,16 @@ class TuiViewMixin:
         busy_label = self._busy_label()
         if busy_label:
             status_raw = status_text.strip()
+            busy_text = f"{busy_label}{self._loading_dots()}"
             if status_raw.lower().startswith(busy_label.lower()):
-                status_text = f"{self._spinner()} {status_raw}"
+                tail = status_raw[len(busy_label) :].strip().lstrip(". ").strip()
+                if tail:
+                    status_text = f"{self._spinner()} {busy_text} | {tail}"
+                else:
+                    status_text = f"{self._spinner()} {busy_text}"
+            elif status_raw:
+                status_text = f"{self._spinner()} {busy_text} | {status_raw}"
             else:
-                status_text = f"{self._spinner()} {busy_label} | {status_raw}"
+                status_text = f"{self._spinner()} {busy_text}"
         self._safe_add(stdscr, height - 1, pad_x, f"Status: {status_text}", self._status_attr())
         stdscr.refresh()

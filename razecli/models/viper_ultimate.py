@@ -20,9 +20,13 @@ MODEL = ModelSpec(
             product_id=0x007A,
             capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Viper Ultimate",
+            report_id_candidates=(0x00,),
         ),
         RawHidPidSpec(
             product_id=0x007B,
+            # Dongle endpoint can expose RGB control path on some hosts/firmware.
+            # Keep enabled so rawhid backend can attempt write+verify instead of
+            # hard-failing at capability gate.
             capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Viper Ultimate",
         ),

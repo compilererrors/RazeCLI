@@ -267,6 +267,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_feature_store_file_arg(rgb_set)
     _add_target_args(rgb_set)
 
+    rgb_reapply = rgb_sub.add_parser(
+        "reapply",
+        help="Re-apply saved RGB state after reconnect/wake (daemon-style poll loop)",
+    )
+    rgb_reapply.add_argument(
+        "--interval",
+        type=float,
+        default=3.0,
+        help="Polling interval in seconds (default: 3.0)",
+    )
+    rgb_reapply.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="Optional max runtime in seconds (default: run until interrupted)",
+    )
+    rgb_reapply.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Optional max poll cycles before exit",
+    )
+    rgb_reapply.add_argument(
+        "--stop-on-unsupported",
+        action="store_true",
+        help="Exit early when backend reports RGB unsupported",
+    )
+    _add_feature_store_file_arg(rgb_reapply)
+    _add_target_args(rgb_reapply)
+
     rgb_menu = rgb_sub.add_parser(
         "menu",
         help="Open TUI RGB editor directly",

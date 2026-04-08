@@ -18,13 +18,13 @@ MODEL = ModelSpec(
     rawhid_pid_specs=(
         RawHidPidSpec(
             product_id=0x00BE,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer DeathAdder V4 Pro",
             experimental=True,
         ),
         RawHidPidSpec(
             product_id=0x00BF,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer DeathAdder V4 Pro",
             experimental=True,
         ),

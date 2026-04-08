@@ -18,12 +18,12 @@ MODEL = ModelSpec(
     rawhid_pid_specs=(
         RawHidPidSpec(
             product_id=0x00CC,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Basilisk V3 Pro 35K",
         ),
         RawHidPidSpec(
             product_id=0x00CD,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Basilisk V3 Pro 35K",
         ),
     ),

@@ -17,7 +17,7 @@ MODEL = ModelSpec(
     rawhid_pid_specs=(
         RawHidPidSpec(
             product_id=0x0091,
-            capabilities=("dpi", "dpi-stages", "poll-rate"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "rgb", "button-mapping"),
             name_hint="Razer Viper 8K Hz",
             experimental=True,
         ),

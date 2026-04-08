@@ -18,12 +18,12 @@ MODEL = ModelSpec(
     rawhid_pid_specs=(
         RawHidPidSpec(
             product_id=0x00A5,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Viper V2 Pro",
         ),
         RawHidPidSpec(
             product_id=0x00A6,
-            capabilities=("dpi", "dpi-stages", "poll-rate", "battery"),
+            capabilities=("dpi", "dpi-stages", "poll-rate", "battery", "rgb", "button-mapping"),
             name_hint="Razer Viper V2 Pro",
         ),
     ),

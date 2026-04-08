@@ -30,9 +30,9 @@ def _emit(payload: object, *, as_json: bool) -> None:
 
 def _add_target_args(parser: argparse.ArgumentParser, default_model: bool = True) -> None:
     if default_model and DEFAULT_MODEL:
-        default_help = f"Defaults to {DEFAULT_MODEL} for settings commands. "
+        example_help = f"Example: --model {DEFAULT_MODEL}. "
     else:
-        default_help = ""
+        example_help = ""
     parser.add_argument(
         "--device",
         help="Target device id (from `razecli devices`)",
@@ -47,9 +47,11 @@ def _add_target_args(parser: argparse.ArgumentParser, default_model: bool = True
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL if default_model else None,
+        default=None,
         help=(
-            f"Model slug to target. {default_help}"
+            "Optional model slug to narrow the target device. "
+            "If omitted, any detected device may be used; specify --device or --address if several match. "
+            f"{example_help}"
             "Use `razecli models` for available slugs."
         ),
     )
@@ -734,11 +736,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tui_parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
+        default=None,
         help=(
-            f"Model slug filter for the TUI (default: {DEFAULT_MODEL})"
+            (
+                "Optional model slug filter. If omitted, all detected models are shown "
+                f"(example filter: {DEFAULT_MODEL})."
+            )
             if DEFAULT_MODEL
-            else "Model slug filter for the TUI"
+            else "Optional model slug filter. If omitted, all detected models are shown."
         ),
     )
     tui_parser.add_argument(
@@ -820,7 +825,7 @@ def _handle_tui(service: DeviceService, args: argparse.Namespace) -> int:
     if args.json:
         raise RazeCliError("--json is not supported in interactive TUI mode")
 
-    model_filter = None if args.all_models else args.model
+    model_filter = None if (args.all_models or args.model is None) else args.model
     if model_filter and service.registry.get(model_filter) is None:
         raise DeviceSelectionError(f"Unknown model: {model_filter}")
 

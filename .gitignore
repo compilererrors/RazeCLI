@@ -9,6 +9,7 @@ dist/
 .eggs/
 *.egg-info/
 pip-wheel-metadata/
+razecli-onedir.spec
 
 # Test and coverage artifacts
 .pytest_cache/

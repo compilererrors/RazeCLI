@@ -235,6 +235,24 @@ Architecture handling:
 - Apple Silicon (`arm64`) downloads `razecli-onedir-macos-arm64.tar.gz`
 - Intel (`x86_64`) downloads `razecli-onedir-macos-x86_64.tar.gz`
 
+Option 5 (Windows build from source):
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\scripts\build_windows_onedir.ps1
+.\dist\razecli-onedir\razecli-onedir.exe --help
+```
+
+Windows onefile build:
+
+```powershell
+.\scripts\build_windows_onefile.ps1
+.\dist\razecli.exe --help
+```
+
+On Windows, `rawhid` / `hidapi` are the intended backends. `macos-ble` and `macos-profiler` are macOS-only.
+
 ## Usage
 
 List models:
@@ -358,12 +376,6 @@ Start TUI:
 razecli tui
 ```
 
-Show all models in TUI:
-
-```bash
-razecli tui --all-models
-```
-
 Show all transport endpoints in TUI:
 
 ```bash
@@ -424,7 +436,7 @@ razecli --backend macos-ble dpi-stages get --model deathadder-v2-pro
 razecli --backend macos-ble battery get --model deathadder-v2-pro
 razecli --backend macos-profiler devices
 razecli --backend hidapi devices
-razecli --backend macos-profiler tui --all-models
+razecli --backend macos-profiler tui
 ```
 
 Bluetooth over `rawhid` (when the OS enumerates the mouse as an HID node, e.g. some `1532:008E` setups) is experimental. On macOS BT, prefer `--backend macos-ble`.
@@ -617,7 +629,7 @@ Rawhid support profiles should be declared in `rawhid_pid_specs` and BLE button 
 - Backend auto-priority is `rawhid` > `macos-ble` > `hidapi` > `macos-profiler`.
 - If multiple devices match, pass `--device`.
 - `rawhid` collapses transport variants by default using model-declared `rawhid_transport_priority`. Use `--all-transports` to see each endpoint.
-- `tui` defaults to the model marked with `cli_default_target=True`. Use `razecli tui --all-models` to view everything detected.
+- `tui` always shows all detected models. The old `--all-models` flag is kept as a compatibility no-op.
 - `macos-profiler` is detect-only and cannot write DPI, DPI stages, poll-rate, or battery.
 - `macos-ble` targets Bluetooth endpoints declared on each model and reuses the same vendor GATT framing and key catalog as documented in OpenSnek (see `docs/ble_reverse_engineering_plan.md`).
 - DeathAdder V2 Pro supports up to 5 DPI stages per active onboard profile bank.

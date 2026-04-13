@@ -768,18 +768,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         help=(
-            (
-                "Optional model slug filter. If omitted, all detected models are shown "
-                f"(example filter: {DEFAULT_MODEL})."
-            )
-            if DEFAULT_MODEL
-            else "Optional model slug filter. If omitted, all detected models are shown."
+            "Legacy option kept for compatibility. "
+            "TUI always shows all detected models; --model is ignored."
         ),
     )
     tui_parser.add_argument(
         "--all-models",
         action="store_true",
-        help="Show all detected models in TUI (ignore --model filter)",
+        help="Deprecated no-op. TUI already shows all detected models.",
     )
     tui_parser.add_argument(
         "--all-transports",
@@ -855,13 +851,9 @@ def _handle_tui(service: DeviceService, args: argparse.Namespace) -> int:
     if args.json:
         raise RazeCliError("--json is not supported in interactive TUI mode")
 
-    model_filter = None if (args.all_models or args.model is None) else args.model
-    if model_filter and service.registry.get(model_filter) is None:
-        raise DeviceSelectionError(f"Unknown model: {model_filter}")
-
     return run_tui(
         service=service,
-        model_filter=model_filter,
+        model_filter=None,
         preselected_device_id=args.device,
         collapse_transports=not bool(args.all_transports),
     )

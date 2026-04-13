@@ -372,7 +372,13 @@ class TuiActionsMixin:
                 self.selected_index = max(0, len(self.devices) - 1)
 
             if not self.devices:
-                self.status = "No devices found"
+                if self.model_filter:
+                    self.status = (
+                        f"No devices matched model filter '{self.model_filter}'. "
+                        "Clear the model filter to show all devices."
+                    )
+                else:
+                    self.status = "No devices found"
                 errors = self.service.backend_errors()
                 if errors:
                     details = "; ".join(f"{backend}: {error}" for backend, error in errors.items())

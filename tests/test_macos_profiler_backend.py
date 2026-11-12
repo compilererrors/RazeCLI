@@ -80,6 +80,7 @@ class MacOSProfilerBackendTest(unittest.TestCase):
     def test_bluetooth_text_fallback_parses_connected_device(self, run_mock):
         usb_payload = {"SPUSBDataType": []}
         bt_json_payload = {"SPBluetoothDataType": [{}]}
+        # Both controller and peripheral addresses are synthetic placeholders.
         bt_text = """
 Bluetooth Controller:
   Address: 02:11:22:33:44:56

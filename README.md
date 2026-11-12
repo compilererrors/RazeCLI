@@ -389,6 +389,11 @@ razecli --json devices
 razecli --json dpi get
 ```
 
+### Synthetic Bluetooth addresses
+
+`02:11:22:33:44:55` (device) and `02:11:22:33:44:56` (controller) are synthetic placeholders for examples and test fixtures, including forms without colons.
+Replace example addresses with your device's address from `razecli devices` or `razecli ble scan` when running commands locally. Keep real device identifiers out of shared examples and tests.
+
 BLE probing (GATT):
 
 ```bash

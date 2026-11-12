@@ -41,7 +41,7 @@ def _add_target_args(parser: argparse.ArgumentParser, default_model: bool = True
         "--address",
         metavar="MAC_OR_UUID",
         help=(
-            "Bluetooth MAC (e.g. 02:11:22:33:44:55) or UUID fragment. "
+            "Bluetooth MAC (synthetic example: 02:11:22:33:44:55) or UUID fragment. "
             "With macos-ble, picks the device whose address matches (same value as `ble ... --address`)."
         ),
     )
@@ -80,7 +80,10 @@ def _add_feature_store_file_arg(parser: argparse.ArgumentParser) -> None:
 def _add_ble_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--address",
-        help="BLE MAC (02:11:22:33:44:55) or CoreBluetooth UUID from `razecli ble scan` / devices",
+        help=(
+            "BLE MAC (synthetic example: 02:11:22:33:44:55) or CoreBluetooth UUID "
+            "from `razecli ble scan` / devices"
+        ),
     )
     parser.add_argument(
         "--name",

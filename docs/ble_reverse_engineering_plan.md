@@ -124,6 +124,8 @@ Read `05840000`, write `05040000` (16-bit little-endian seconds). Documented in 
 
 ## Command cheat sheet
 
+The address `02:11:22:33:44:55` below is a synthetic placeholder. Replace it with your device's address from `razecli devices` or `razecli ble scan` when running commands locally; keep shared examples and test fixtures synthetic.
+
 Install or refresh the editable package:
 
 ```bash

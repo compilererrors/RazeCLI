@@ -257,14 +257,14 @@ def _require_ble_mac_address_for_bank_commands(address: str) -> None:
     if not text:
         raise RazeCliError(
             "ble bank-probe / bank-snapshot require --address with the mouse Bluetooth MAC "
-            "or CoreBluetooth UUID, e.g. --address 02:11:22:33:44:55. Copy it from "
+            "or CoreBluetooth UUID. Synthetic example: --address 02:11:22:33:44:55. Copy your device's address from "
             "`razecli devices`, `razecli --backend macos-ble devices`, `razecli ble scan`, "
             "or the TUI id= line (MAC suffix after :bt:)."
         )
     if "\u2026" in text or text in {".", "..", "...", "…"}:
         raise RazeCliError(
             "--address must be the real MAC or UUID, not the documentation placeholder (… or ...). "
-            "Example: --address 02:11:22:33:44:55"
+            "Synthetic example: --address 02:11:22:33:44:55"
         )
     if not _is_valid_ble_bank_target_address(text):
         raise RazeCliError(
